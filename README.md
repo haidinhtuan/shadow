@@ -30,7 +30,15 @@ This controller implements the **Message-based Stateful Microservice Migration (
 | **Migration Mechanism** | Delete & Recreate (Destructive) | Checkpoint & Restore (Preservative) |
 | **In-Memory State** | Lost | **Preserved** via CRIU (Forensic Container Checkpointing) |
 | **Transfer Method** | Detach/Attach PV (Slow) | **OCI Image** (Fast, Portable) |
+| **Coexistence** | Impossible (Name Collision) | **Shadow Pods** (Target runs as `pod-xyz-shadow`) |
 | **Data Consistency** | Crash Recovery | **Message Replay** (Zero-Loss Handoff) |
+
+### The "Two Instances" Problem
+A major limitation of StatefulSets is that `app-0` cannot exist on two nodes simultaneously. MS2M overcomes this using a **Shadow Pod Strategy**:
+1.  **Source**: `app-0` (Running on Node A).
+2.  **Target**: Controller creates a standalone pod named `app-0-shadow` (on Node B).
+3.  **Sync**: `app-0-shadow` restores memory and replays messages while `app-0` is frozen.
+4.  **Switch**: Once synchronized, traffic is routed to `app-0-shadow`, and `app-0` is terminated.
 
 ## Local Development (Running locally)
 
