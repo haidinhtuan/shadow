@@ -50,25 +50,53 @@ You can run the controller locally against a remote cluster or a local cluster (
    go run main.go
    ```
 
-## deploying to GKE
+## Deploying to GKE
 
-### 1. Provision Infrastructure
+### 1. Prerequisites & Tooling
 
-Navigate to the `terraform` directory and apply the configuration:
+Before starting, ensure you have the following installed on your local machine:
+- **Google Cloud SDK (`gcloud`)**: [Installation Guide](https://cloud.google.com/sdk/docs/install)
+- **Terraform**: [Installation Guide](https://developer.hashicorp.com/terraform/downloads)
+- **kubectl**: Install via `gcloud components install kubectl`
 
-```bash
-cd terraform
-terraform init
-terraform apply -var="project_id=YOUR_PROJECT_ID"
-```
+### 2. Google Cloud Platform Setup
 
-Connect to the cluster:
+1.  **Create a Project**: Create a new project in the [Google Cloud Console](https://console.cloud.google.com/).
+2.  **Enable Billing**: Ensure billing is active for the project.
+3.  **Enable APIs**: Enable the Kubernetes Engine API:
+    ```bash
+    gcloud services enable container.googleapis.com
+    ```
+4.  **Authenticate**:
+    ```bash
+    gcloud auth login
+    gcloud auth application-default login
+    ```
 
-```bash
-gcloud container clusters get-credentials my-k8s-controller-cluster --region us-central1-a
-```
+### 3. Provision Infrastructure (Terraform)
 
-### 2. Build and Push Image
+The Terraform configuration is optimized for MS2M, using `UBUNTU_CONTAINERD` nodes to support CRIU checkpointing.
+
+1.  **Navigate to the terraform directory**:
+    ```bash
+    cd terraform
+    ```
+2.  **Initialize and Apply**:
+    ```bash
+    export PROJECT_ID="your-project-id"
+    terraform init
+    terraform apply -var="project_id=$PROJECT_ID"
+    ```
+3.  **Connect to the Cluster**:
+    ```bash
+    gcloud container clusters get-credentials my-k8s-controller-cluster --region us-central1-a
+    ```
+4.  **Verify Nodes**:
+    ```bash
+    kubectl get nodes
+    ```
+
+### 4. Build and Push Image
 
 Build the Docker image and push it to Google Container Registry (GCR) or Artifact Registry.
 
