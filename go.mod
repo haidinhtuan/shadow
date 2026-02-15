@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/google/go-containerregistry v0.20.7
+	github.com/rabbitmq/amqp091-go v1.10.0
 	k8s.io/apimachinery v0.35.0
 	k8s.io/client-go v0.35.0
 	sigs.k8s.io/controller-runtime v0.23.1
