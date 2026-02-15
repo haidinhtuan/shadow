@@ -43,3 +43,10 @@ Dissertation_Final.pdf
 
 # Coverage
 cover.out
+
+# Evaluation infrastructure state (contains IONOS resource IDs)
+eval/infra/state.env
+eval/infra/kubeconfig
+
+# Evaluation results
+eval/results/

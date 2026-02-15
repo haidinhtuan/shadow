@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: consumer
+spec:
+  clusterIP: None
+  selector:
+    app: consumer
+  ports:
+  - port: 8080
+    name: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: consumer
+  labels:
+    app: consumer
+spec:
+  serviceName: consumer
+  replicas: 1
+  selector:
+    matchLabels:
+      app: consumer
+  template:
+    metadata:
+      labels:
+        app: consumer
+    spec:
+      containers:
+      - name: consumer
+        image: python:3.11-slim
+        command: ["python3", "-c"]
+        args:
+        - |
+          import pika, time, json, os, signal, threading
+          from http.server import HTTPServer, BaseHTTPRequestHandler
+
+          delay_ms = int(os.environ.get('PROCESSING_DELAY_MS', '50'))
+          broker = os.environ.get('RABBITMQ_URL', 'amqp://guest:guest@rabbitmq:5672/')
+          queue = os.environ.get('QUEUE_NAME', 'app.events')
+
+          # In-memory state (this is what CRIU preserves)
+          state = {"processed": 0, "last_seq": -1}
+
+          class Handler(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  self.send_response(200)
+                  self.send_header('Content-Type', 'application/json')
+                  self.end_headers()
+                  self.wfile.write(json.dumps(state).encode())
+              def log_message(self, *a): pass
+
+          # Health endpoint in background
+          srv = HTTPServer(('', 8080), Handler)
+          threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+          conn = pika.BlockingConnection(pika.URLParameters(broker))
+          ch = conn.channel()
+          ch.queue_declare(queue=queue, durable=True)
+          ch.basic_qos(prefetch_count=1)
+
+          def callback(ch, method, properties, body):
+              msg = json.loads(body)
+              time.sleep(delay_ms / 1000.0)
+              state["processed"] += 1
+              state["last_seq"] = msg.get("seq", -1)
+              if state["processed"] % 100 == 0:
+                  print(f"Processed {state['processed']} messages, last_seq={state['last_seq']}", flush=True)
+              ch.basic_ack(delivery_tag=method.delivery_tag)
+
+          print(f"Consuming from {queue}, delay={delay_ms}ms", flush=True)
+          ch.basic_consume(queue=queue, on_message_callback=callback)
+          ch.start_consuming()
+        env:
+        - name: PROCESSING_DELAY_MS
+          value: "50"
+        - name: RABBITMQ_URL
+          value: "amqp://guest:guest@rabbitmq:5672/"
+        - name: QUEUE_NAME
+          value: "app.events"
+        ports:
+        - containerPort: 8080
+          name: http

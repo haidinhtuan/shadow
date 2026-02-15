@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: message-producer
+  labels:
+    app: message-producer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: message-producer
+  template:
+    metadata:
+      labels:
+        app: message-producer
+    spec:
+      containers:
+      - name: producer
+        image: python:3.11-slim
+        command: ["python3", "-c"]
+        args:
+        - |
+          import pika, time, json, os, uuid
+          rate = int(os.environ.get('MSG_RATE', '10'))
+          broker = os.environ.get('RABBITMQ_URL', 'amqp://guest:guest@rabbitmq:5672/')
+          queue = os.environ.get('QUEUE_NAME', 'app.events')
+          exchange = os.environ.get('EXCHANGE_NAME', 'app.fanout')
+
+          conn = pika.BlockingConnection(pika.URLParameters(broker))
+          ch = conn.channel()
+          ch.exchange_declare(exchange=exchange, exchange_type='fanout', durable=True)
+          ch.queue_declare(queue=queue, durable=True)
+          ch.queue_bind(queue=queue, exchange=exchange)
+
+          seq = 0
+          print(f"Producing {rate} msg/s to exchange={exchange}", flush=True)
+          while True:
+              for _ in range(rate):
+                  msg = json.dumps({"seq": seq, "id": str(uuid.uuid4()), "ts": time.time()})
+                  ch.basic_publish(exchange=exchange, routing_key='', body=msg,
+                      properties=pika.BasicProperties(delivery_mode=2))
+                  seq += 1
+              time.sleep(1)
+        env:
+        - name: MSG_RATE
+          value: "10"
+        - name: RABBITMQ_URL
+          value: "amqp://guest:guest@rabbitmq:5672/"
+        - name: QUEUE_NAME
+          value: "app.events"
+        - name: EXCHANGE_NAME
+          value: "app.fanout"
