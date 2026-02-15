@@ -30,9 +30,11 @@ spec:
       containers:
       - name: consumer
         image: python:3.11-slim
-        command: ["python3", "-c"]
+        command: ["/bin/bash", "-c"]
         args:
         - |
+          pip install -q pika
+          cat > /tmp/consumer.py << 'PYEOF'
           import pika, time, json, os, signal, threading
           from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -72,6 +74,8 @@ spec:
           print(f"Consuming from {queue}, delay={delay_ms}ms", flush=True)
           ch.basic_consume(queue=queue, on_message_callback=callback)
           ch.start_consuming()
+          PYEOF
+          exec python3 /tmp/consumer.py
         env:
         - name: PROCESSING_DELAY_MS
           value: "50"

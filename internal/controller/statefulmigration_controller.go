@@ -246,9 +246,14 @@ func (r *StatefulMigrationReconciler) handleTransferring(ctx context.Context, m 
 						},
 						Containers: []corev1.Container{
 							{
-								Name:  "checkpoint-transfer",
-								Image: "checkpoint-transfer:latest",
-								Args:  []string{m.Status.CheckpointID, imageRef, m.Status.ContainerName},
+								Name:            "checkpoint-transfer",
+								Image:           "checkpoint-transfer:latest",
+								ImagePullPolicy: corev1.PullIfNotPresent,
+								Args:            []string{m.Status.CheckpointID, imageRef, m.Status.ContainerName},
+								SecurityContext: &corev1.SecurityContext{
+									RunAsUser:  func() *int64 { uid := int64(0); return &uid }(),
+									RunAsGroup: func() *int64 { gid := int64(0); return &gid }(),
+								},
 								VolumeMounts: []corev1.VolumeMount{
 									{
 										Name:      "checkpoints",
@@ -274,6 +279,10 @@ func (r *StatefulMigrationReconciler) handleTransferring(ctx context.Context, m 
 		}
 
 		if err := r.Create(ctx, job); err != nil {
+			if errors.IsAlreadyExists(err) {
+				// Job was created by a previous reconcile loop; requeue to check its status
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
 			return r.failMigration(ctx, m, fmt.Sprintf("create transfer job: %v", err))
 		}
 
@@ -398,6 +407,9 @@ func (r *StatefulMigrationReconciler) handleRestoring(ctx context.Context, m *mi
 		}
 
 		if err := r.Create(ctx, newPod); err != nil {
+			if errors.IsAlreadyExists(err) {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
 			return r.failMigration(ctx, m, fmt.Sprintf("create target pod: %v", err))
 		}
 

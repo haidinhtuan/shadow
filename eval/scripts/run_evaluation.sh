@@ -7,7 +7,7 @@ REPETITIONS=10
 RESULTS_FILE="eval/results/migration-metrics-$(date +%Y%m%d-%H%M%S).csv"
 NAMESPACE="${NAMESPACE:-default}"
 TARGET_NODE="${TARGET_NODE:-}"  # must be set
-CHECKPOINT_REPO="${CHECKPOINT_REPO:-localhost:5000/checkpoints}"
+CHECKPOINT_REPO="${CHECKPOINT_REPO:-registry.registry.svc.cluster.local:5000/checkpoints}"
 
 mkdir -p "$(dirname "$RESULTS_FILE")"
 
@@ -51,7 +51,7 @@ spec:
   replayCutoffSeconds: 120
   messageQueueConfig:
     queueName: app.events
-    brokerUrl: amqp://guest:guest@rabbitmq:5672/
+    brokerUrl: amqp://guest:guest@rabbitmq.rabbitmq.svc.cluster.local:5672/
     exchangeName: app.fanout
 YAML
 

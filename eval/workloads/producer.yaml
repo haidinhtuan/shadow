@@ -17,10 +17,13 @@ spec:
       containers:
       - name: producer
         image: python:3.11-slim
-        command: ["python3", "-c"]
+        command: ["/bin/bash", "-c"]
         args:
         - |
+          pip install -q pika
+          cat > /tmp/producer.py << 'PYEOF'
           import pika, time, json, os, uuid
+
           rate = int(os.environ.get('MSG_RATE', '10'))
           broker = os.environ.get('RABBITMQ_URL', 'amqp://guest:guest@rabbitmq.rabbitmq.svc.cluster.local:5672/')
           queue = os.environ.get('QUEUE_NAME', 'app.events')
@@ -41,6 +44,8 @@ spec:
                       properties=pika.BasicProperties(delivery_mode=2))
                   seq += 1
               time.sleep(1)
+          PYEOF
+          exec python3 /tmp/producer.py
         env:
         - name: MSG_RATE
           value: "10"
