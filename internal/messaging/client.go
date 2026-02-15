@@ -34,7 +34,7 @@ type BrokerClient interface {
 
 	// DeleteSecondaryQueue removes the secondary queue and its
 	// associated exchange, restoring the original routing.
-	DeleteSecondaryQueue(ctx context.Context, secondaryQueue, primaryQueue string) error
+	DeleteSecondaryQueue(ctx context.Context, secondaryQueue, primaryQueue, exchangeName string) error
 
 	// GetQueueDepth returns the number of messages waiting in the
 	// given queue. Used to monitor replay lag.

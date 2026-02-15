@@ -335,7 +335,7 @@ kubectl logs -l control-plane=controller-manager -f
 
 ## Evaluation
 
-The evaluation infrastructure uses bare-metal IONOS cloud VMs provisioned with `kubeadm`. The cluster runs CRI-O as the container runtime with CRIU compiled from source to support forensic container checkpointing.
+The evaluation infrastructure uses bare-metal cloud VMs provisioned with `kubeadm`. The cluster runs CRI-O as the container runtime with CRIU compiled from source to support forensic container checkpointing.
 
 The test workload is a stateful message-processing microservice backed by RabbitMQ. Evaluation scenarios measure:
 

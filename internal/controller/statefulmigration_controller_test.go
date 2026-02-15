@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -704,6 +705,341 @@ func TestIntegration_CreateMigration_SetsPending(t *testing.T) {
 	}
 	if updated.Status.Phase != migrationv1alpha1.PhasePending {
 		t.Errorf("expected phase Pending, got %s", updated.Status.Phase)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests for specific fixes
+// ---------------------------------------------------------------------------
+
+func TestReconcile_Pending_ResolvesContainerName(t *testing.T) {
+	// When Spec.ContainerName is empty, handlePending should auto-detect
+	// the container name from the first container in the source pod.
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "worker", Image: "worker:latest"},
+				{Name: "sidecar", Image: "sidecar:latest"},
+			},
+		},
+	}
+
+	migration := newMigration("mig-resolve-ctr", migrationv1alpha1.PhasePending)
+	// Ensure ContainerName is empty so auto-detection kicks in
+	migration.Spec.ContainerName = ""
+
+	r, _, ctx := setupTest(migration, sourcePod)
+
+	_, err := reconcileOnce(r, ctx, "mig-resolve-ctr", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-resolve-ctr", "default")
+	if got.Status.ContainerName != "worker" {
+		t.Errorf("expected Status.ContainerName %q (first container), got %q", "worker", got.Status.ContainerName)
+	}
+}
+
+func TestReconcile_Pending_UsesExplicitContainerName(t *testing.T) {
+	// When Spec.ContainerName is set explicitly, it should be used as-is.
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "main-app", Image: "main:latest"},
+				{Name: "my-sidecar", Image: "sidecar:latest"},
+			},
+		},
+	}
+
+	migration := newMigration("mig-explicit-ctr", migrationv1alpha1.PhasePending)
+	migration.Spec.ContainerName = "my-sidecar"
+
+	r, _, ctx := setupTest(migration, sourcePod)
+
+	_, err := reconcileOnce(r, ctx, "mig-explicit-ctr", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-explicit-ctr", "default")
+	if got.Status.ContainerName != "my-sidecar" {
+		t.Errorf("expected Status.ContainerName %q, got %q", "my-sidecar", got.Status.ContainerName)
+	}
+}
+
+func TestReconcile_Transferring_JobHasOwnerRef(t *testing.T) {
+	// Verify the transfer Job has an OwnerReference pointing to the StatefulMigration.
+	migration := newMigration("mig-ownerref", migrationv1alpha1.PhaseTransferring)
+	migration.Status.SourceNode = "node-1"
+	migration.Status.CheckpointID = "/var/lib/kubelet/checkpoints/checkpoint-myapp-0.tar"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, _, ctx := setupTest(migration)
+
+	_, err := reconcileOnce(r, ctx, "mig-ownerref", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "mig-ownerref-transfer", Namespace: "default"}, job); err != nil {
+		t.Fatalf("expected transfer job to be created: %v", err)
+	}
+
+	if len(job.OwnerReferences) == 0 {
+		t.Fatal("expected job to have at least one OwnerReference")
+	}
+	ownerRef := job.OwnerReferences[0]
+	if ownerRef.Kind != "StatefulMigration" {
+		t.Errorf("expected OwnerReference Kind %q, got %q", "StatefulMigration", ownerRef.Kind)
+	}
+	if ownerRef.Name != "mig-ownerref" {
+		t.Errorf("expected OwnerReference Name %q, got %q", "mig-ownerref", ownerRef.Name)
+	}
+}
+
+func TestReconcile_Transferring_JobHasVolumeMount(t *testing.T) {
+	// Verify the transfer Job has a hostPath volume mount at /var/lib/kubelet/checkpoints.
+	migration := newMigration("mig-volmnt", migrationv1alpha1.PhaseTransferring)
+	migration.Status.SourceNode = "node-1"
+	migration.Status.CheckpointID = "/var/lib/kubelet/checkpoints/checkpoint-myapp-0.tar"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, _, ctx := setupTest(migration)
+
+	_, err := reconcileOnce(r, ctx, "mig-volmnt", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "mig-volmnt-transfer", Namespace: "default"}, job); err != nil {
+		t.Fatalf("expected transfer job to be created: %v", err)
+	}
+
+	// Check volumes for hostPath
+	foundVolume := false
+	for _, vol := range job.Spec.Template.Spec.Volumes {
+		if vol.Name == "checkpoints" && vol.HostPath != nil && vol.HostPath.Path == "/var/lib/kubelet/checkpoints" {
+			foundVolume = true
+		}
+	}
+	if !foundVolume {
+		t.Error("expected job to have a hostPath volume named 'checkpoints' at /var/lib/kubelet/checkpoints")
+	}
+
+	// Check volume mount on the container
+	containers := job.Spec.Template.Spec.Containers
+	if len(containers) == 0 {
+		t.Fatal("expected at least one container in the job")
+	}
+	foundMount := false
+	for _, vm := range containers[0].VolumeMounts {
+		if vm.Name == "checkpoints" && vm.MountPath == "/var/lib/kubelet/checkpoints" {
+			foundMount = true
+		}
+	}
+	if !foundMount {
+		t.Error("expected container to have a volume mount named 'checkpoints' at /var/lib/kubelet/checkpoints")
+	}
+}
+
+func TestReconcile_Transferring_JobPassesContainerName(t *testing.T) {
+	// Verify the transfer Job's container Args include 3 arguments:
+	// checkpoint path, image ref, and container name.
+	migration := newMigration("mig-args", migrationv1alpha1.PhaseTransferring)
+	migration.Status.SourceNode = "node-1"
+	migration.Status.CheckpointID = "/var/lib/kubelet/checkpoints/checkpoint-myapp-0.tar"
+	migration.Status.ContainerName = "my-container"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, _, ctx := setupTest(migration)
+
+	_, err := reconcileOnce(r, ctx, "mig-args", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "mig-args-transfer", Namespace: "default"}, job); err != nil {
+		t.Fatalf("expected transfer job to be created: %v", err)
+	}
+
+	containers := job.Spec.Template.Spec.Containers
+	if len(containers) == 0 {
+		t.Fatal("expected at least one container in the job")
+	}
+
+	args := containers[0].Args
+	if len(args) != 3 {
+		t.Fatalf("expected 3 args (checkpoint path, image ref, container name), got %d: %v", len(args), args)
+	}
+	if args[0] != migration.Status.CheckpointID {
+		t.Errorf("expected args[0] (checkpoint path) %q, got %q", migration.Status.CheckpointID, args[0])
+	}
+	expectedImageRef := fmt.Sprintf("%s/%s:checkpoint", migration.Spec.CheckpointImageRepository, migration.Spec.SourcePod)
+	if args[1] != expectedImageRef {
+		t.Errorf("expected args[1] (image ref) %q, got %q", expectedImageRef, args[1])
+	}
+	if args[2] != "my-container" {
+		t.Errorf("expected args[2] (container name) %q, got %q", "my-container", args[2])
+	}
+}
+
+func TestReconcile_Restoring_ShadowPod_HasOwnerRef(t *testing.T) {
+	// Verify the target pod created during restore has an OwnerReference
+	// to the StatefulMigration.
+	migration := newMigration("mig-pod-owner", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.CheckpointID = "/var/lib/kubelet/checkpoints/checkpoint-myapp-0.tar"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	r, _, ctx := setupTest(migration, sourcePod)
+
+	_, err := reconcileOnce(r, ctx, "mig-pod-owner", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	targetPod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "myapp-0-shadow", Namespace: "default"}, targetPod); err != nil {
+		t.Fatalf("expected shadow pod to be created: %v", err)
+	}
+
+	if len(targetPod.OwnerReferences) == 0 {
+		t.Fatal("expected target pod to have at least one OwnerReference")
+	}
+	ownerRef := targetPod.OwnerReferences[0]
+	if ownerRef.Kind != "StatefulMigration" {
+		t.Errorf("expected OwnerReference Kind %q, got %q", "StatefulMigration", ownerRef.Kind)
+	}
+	if ownerRef.Name != "mig-pod-owner" {
+		t.Errorf("expected OwnerReference Name %q, got %q", "mig-pod-owner", ownerRef.Name)
+	}
+}
+
+func TestReconcile_Restoring_ShadowPod_CopiesSourceLabels(t *testing.T) {
+	// Verify that source pod labels are copied to the target pod.
+	migration := newMigration("mig-labels", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.CheckpointID = "/var/lib/kubelet/checkpoints/checkpoint-myapp-0.tar"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+			Labels: map[string]string{
+				"app":     "myapp",
+				"version": "v1",
+				"team":    "backend",
+			},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	r, _, ctx := setupTest(migration, sourcePod)
+
+	_, err := reconcileOnce(r, ctx, "mig-labels", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	targetPod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "myapp-0-shadow", Namespace: "default"}, targetPod); err != nil {
+		t.Fatalf("expected shadow pod to be created: %v", err)
+	}
+
+	// Verify source labels are copied
+	for _, key := range []string{"app", "version", "team"} {
+		if targetPod.Labels[key] != sourcePod.Labels[key] {
+			t.Errorf("expected label %q=%q on target pod, got %q", key, sourcePod.Labels[key], targetPod.Labels[key])
+		}
+	}
+
+	// Verify migration labels are also present
+	if targetPod.Labels["migration.ms2m.io/migration"] != "mig-labels" {
+		t.Errorf("expected migration label to be set, got %q", targetPod.Labels["migration.ms2m.io/migration"])
+	}
+	if targetPod.Labels["migration.ms2m.io/role"] != "target" {
+		t.Errorf("expected role label %q, got %q", "target", targetPod.Labels["migration.ms2m.io/role"])
+	}
+}
+
+func TestReconcile_Restoring_UsesContainerName(t *testing.T) {
+	// Verify the target pod uses Status.ContainerName instead of hardcoded "app".
+	migration := newMigration("mig-ctr-name", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "my-worker"
+	migration.Status.CheckpointID = "/var/lib/kubelet/checkpoints/checkpoint-myapp-0.tar"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "my-worker", Image: "worker:latest"},
+			},
+		},
+	}
+
+	r, _, ctx := setupTest(migration, sourcePod)
+
+	_, err := reconcileOnce(r, ctx, "mig-ctr-name", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	targetPod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "myapp-0-shadow", Namespace: "default"}, targetPod); err != nil {
+		t.Fatalf("expected shadow pod to be created: %v", err)
+	}
+
+	if len(targetPod.Spec.Containers) == 0 {
+		t.Fatal("expected at least one container in the target pod")
+	}
+	if targetPod.Spec.Containers[0].Name != "my-worker" {
+		t.Errorf("expected container name %q, got %q", "my-worker", targetPod.Spec.Containers[0].Name)
 	}
 }
 

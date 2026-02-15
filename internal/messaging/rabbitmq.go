@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -104,14 +103,7 @@ func (r *RabbitMQClient) CreateSecondaryQueue(_ context.Context, primaryQueue, e
 
 // DeleteSecondaryQueue tears down the fan-out setup: unbinds the primary
 // queue, deletes the secondary queue, and removes the exchange.
-func (r *RabbitMQClient) DeleteSecondaryQueue(_ context.Context, secondaryQueue, primaryQueue string) error {
-	// Derive the exchange name from the secondary queue name.
-	// Convention: secondary queue = primaryQueue + ".ms2m-replay",
-	// and the exchange was named by the caller during CreateSecondaryQueue.
-	// We reconstruct the base name by stripping the known suffix.
-	baseName := strings.TrimSuffix(secondaryQueue, ".ms2m-replay")
-	exchangeName := baseName + ".fanout"
-
+func (r *RabbitMQClient) DeleteSecondaryQueue(_ context.Context, secondaryQueue, primaryQueue, exchangeName string) error {
 	if err := r.ch.QueueUnbind(primaryQueue, "", exchangeName, nil); err != nil {
 		return fmt.Errorf("unbind primary queue %q from %q: %w", primaryQueue, exchangeName, err)
 	}

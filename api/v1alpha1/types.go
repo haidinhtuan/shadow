@@ -35,6 +35,10 @@ type StatefulMigrationSpec struct {
 	// SourcePod is the name of the pod to migrate (must be in the same namespace)
 	SourcePod string `json:"sourcePod,omitempty"`
 
+	// ContainerName is the name of the container to checkpoint.
+	// If empty, defaults to the first container in the source pod.
+	ContainerName string `json:"containerName,omitempty"`
+
 	// TargetNode is the optional node selector for the target
 	TargetNode string `json:"targetNode,omitempty"`
 
@@ -67,6 +71,9 @@ type StatefulMigrationStatus struct {
 
 	// TargetPod is the name of the restored pod
 	TargetPod string `json:"targetPod,omitempty"`
+
+	// ContainerName is the resolved container name (from spec or auto-detected)
+	ContainerName string `json:"containerName,omitempty"`
 
 	// Conditions represents the latest available observations of the object's state
 	Conditions []metav1.Condition `json:"conditions,omitempty"`

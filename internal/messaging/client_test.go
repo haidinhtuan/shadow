@@ -63,7 +63,7 @@ func TestMockBrokerClient_CreateAndDeleteSecondaryQueue(t *testing.T) {
 	}
 
 	// Delete the secondary queue
-	if err := mock.DeleteSecondaryQueue(ctx, secondaryQ, "orders"); err != nil {
+	if err := mock.DeleteSecondaryQueue(ctx, secondaryQ, "orders", "orders.fanout"); err != nil {
 		t.Fatalf("DeleteSecondaryQueue() unexpected error: %v", err)
 	}
 	if _, ok := mock.Queues[secondaryQ]; ok {
@@ -79,7 +79,7 @@ func TestMockBrokerClient_CreateAndDeleteSecondaryQueue(t *testing.T) {
 	// Test error injection on delete
 	mock.CreateQueueErr = nil
 	mock.DeleteQueueErr = errors.New("queue not found")
-	if err := mock.DeleteSecondaryQueue(ctx, "payments.ms2m-replay", "payments"); err == nil {
+	if err := mock.DeleteSecondaryQueue(ctx, "payments.ms2m-replay", "payments", "payments.fanout"); err == nil {
 		t.Fatal("expected DeleteSecondaryQueue() to return error when DeleteQueueErr is set")
 	}
 }

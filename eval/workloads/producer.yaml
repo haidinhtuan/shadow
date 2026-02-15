@@ -22,7 +22,7 @@ spec:
         - |
           import pika, time, json, os, uuid
           rate = int(os.environ.get('MSG_RATE', '10'))
-          broker = os.environ.get('RABBITMQ_URL', 'amqp://guest:guest@rabbitmq:5672/')
+          broker = os.environ.get('RABBITMQ_URL', 'amqp://guest:guest@rabbitmq.rabbitmq.svc.cluster.local:5672/')
           queue = os.environ.get('QUEUE_NAME', 'app.events')
           exchange = os.environ.get('EXCHANGE_NAME', 'app.fanout')
 
@@ -45,7 +45,7 @@ spec:
         - name: MSG_RATE
           value: "10"
         - name: RABBITMQ_URL
-          value: "amqp://guest:guest@rabbitmq:5672/"
+          value: "amqp://guest:guest@rabbitmq.rabbitmq.svc.cluster.local:5672/"
         - name: QUEUE_NAME
           value: "app.events"
         - name: EXCHANGE_NAME

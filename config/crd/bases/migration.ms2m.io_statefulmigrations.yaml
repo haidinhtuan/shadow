@@ -35,6 +35,10 @@ spec:
                 description: CheckpointImageRepository is the registry location to push
                   the checkpoint image
                 type: string
+              containerName:
+                description: ContainerName is the name of the container to checkpoint.
+                  If empty, defaults to the first container in the source pod.
+                type: string
               messageQueueConfig:
                 description: MessageQueueConfig contains details about the messaging
                   system
@@ -80,6 +84,9 @@ spec:
             properties:
               checkpointID:
                 description: CheckpointID is the identifier of the created checkpoint
+                type: string
+              containerName:
+                description: ContainerName is the resolved container name
                 type: string
               conditions:
                 description: Conditions represents the latest available observations

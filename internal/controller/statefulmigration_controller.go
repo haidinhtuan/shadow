@@ -106,6 +106,16 @@ func (r *StatefulMigrationReconciler) handlePending(ctx context.Context, m *migr
 	// Record source node
 	m.Status.SourceNode = sourcePod.Spec.NodeName
 
+	// Resolve container name
+	containerName := m.Spec.ContainerName
+	if containerName == "" && len(sourcePod.Spec.Containers) > 0 {
+		containerName = sourcePod.Spec.Containers[0].Name
+	}
+	if containerName == "" {
+		return r.failMigration(ctx, m, "could not determine container name for source pod")
+	}
+	m.Status.ContainerName = containerName
+
 	// Initialize timing metadata
 	now := metav1.Now()
 	m.Status.StartTime = &now
@@ -136,6 +146,7 @@ func (r *StatefulMigrationReconciler) handlePending(ctx context.Context, m *migr
 	// Re-apply status fields (may have been reset by re-fetch above)
 	m.Status.SourceNode = sourcePod.Spec.NodeName
 	m.Status.StartTime = &now
+	m.Status.ContainerName = containerName
 	if m.Status.PhaseTimings == nil {
 		m.Status.PhaseTimings = make(map[string]string)
 	}
@@ -174,7 +185,7 @@ func (r *StatefulMigrationReconciler) handleCheckpointing(ctx context.Context, m
 			m.Status.SourceNode,
 			m.Namespace,
 			m.Spec.SourcePod,
-			m.Spec.SourcePod, // container name typically matches pod basename
+			m.Status.ContainerName,
 		)
 		if err != nil {
 			return r.failMigration(ctx, m, fmt.Sprintf("kubelet checkpoint: %v", err))
@@ -222,6 +233,9 @@ func (r *StatefulMigrationReconciler) handleTransferring(ctx context.Context, m 
 					"migration.ms2m.io/migration": m.Name,
 					"migration.ms2m.io/phase":     "transferring",
 				},
+				OwnerReferences: []metav1.OwnerReference{
+					*metav1.NewControllerRef(m, migrationv1alpha1.GroupVersion.WithKind("StatefulMigration")),
+				},
 			},
 			Spec: batchv1.JobSpec{
 				Template: corev1.PodTemplateSpec{
@@ -234,7 +248,24 @@ func (r *StatefulMigrationReconciler) handleTransferring(ctx context.Context, m 
 							{
 								Name:  "checkpoint-transfer",
 								Image: "checkpoint-transfer:latest",
-								Args:  []string{m.Status.CheckpointID, imageRef},
+								Args:  []string{m.Status.CheckpointID, imageRef, m.Status.ContainerName},
+								VolumeMounts: []corev1.VolumeMount{
+									{
+										Name:      "checkpoints",
+										MountPath: "/var/lib/kubelet/checkpoints",
+										ReadOnly:  true,
+									},
+								},
+							},
+						},
+						Volumes: []corev1.Volume{
+							{
+								Name: "checkpoints",
+								VolumeSource: corev1.VolumeSource{
+									HostPath: &corev1.HostPathVolumeSource{
+										Path: "/var/lib/kubelet/checkpoints",
+									},
+								},
 							},
 						},
 					},
@@ -329,25 +360,35 @@ func (r *StatefulMigrationReconciler) handleRestoring(ctx context.Context, m *mi
 		checkpointImage := fmt.Sprintf("%s/%s:checkpoint", m.Spec.CheckpointImageRepository, m.Spec.SourcePod)
 		containers := []corev1.Container{
 			{
-				Name:  "app",
+				Name:  m.Status.ContainerName,
 				Image: checkpointImage,
 			},
 		}
-		// If we have the source pod, preserve the container name
-		if sourcePod.Name != "" && len(sourcePod.Spec.Containers) > 0 {
-			containers[0].Name = sourcePod.Spec.Containers[0].Name
+
+		// Build labels - start with migration labels
+		labels := map[string]string{
+			"migration.ms2m.io/migration": m.Name,
+			"migration.ms2m.io/role":      "target",
+		}
+		// Copy source pod labels (available in ShadowPod strategy)
+		if sourcePod.Name != "" {
+			for k, v := range sourcePod.Labels {
+				if _, exists := labels[k]; !exists {
+					labels[k] = v
+				}
+			}
 		}
 
 		newPod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      targetPodName,
 				Namespace: m.Namespace,
-				Labels: map[string]string{
-					"migration.ms2m.io/migration": m.Name,
-					"migration.ms2m.io/role":      "target",
-				},
+				Labels:    labels,
 				Annotations: map[string]string{
 					"migration.ms2m.io/checkpoint-image": checkpointImage,
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					*metav1.NewControllerRef(m, migrationv1alpha1.GroupVersion.WithKind("StatefulMigration")),
 				},
 			},
 			Spec: corev1.PodSpec{
@@ -432,6 +473,23 @@ func (r *StatefulMigrationReconciler) handleReplaying(ctx context.Context, m *mi
 		return r.transitionPhase(ctx, m, migrationv1alpha1.PhaseFinalizing)
 	}
 
+	// Check if we've exceeded the replay cutoff timeout
+	if m.Spec.ReplayCutoffSeconds > 0 {
+		if startStr, ok := m.Status.PhaseTimings["Replaying.start"]; ok {
+			if startTime, parseErr := time.Parse(time.RFC3339, startStr); parseErr == nil {
+				elapsed := time.Since(startTime)
+				cutoff := time.Duration(m.Spec.ReplayCutoffSeconds) * time.Second
+				if elapsed > cutoff {
+					logger.Info("Replay cutoff reached, proceeding to finalization",
+						"elapsed", elapsed, "cutoff", cutoff, "remainingDepth", depth)
+					delete(m.Status.PhaseTimings, "Replaying.start")
+					r.recordPhaseTiming(m, "Replaying", elapsed)
+					return r.transitionPhase(ctx, m, migrationv1alpha1.PhaseFinalizing)
+				}
+			}
+		}
+	}
+
 	// Still draining, poll again
 	return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 }
@@ -450,7 +508,7 @@ func (r *StatefulMigrationReconciler) handleFinalizing(ctx context.Context, m *m
 
 	// Tear down the secondary queue
 	secondaryQueue := m.Spec.MessageQueueConfig.QueueName + ".ms2m-replay"
-	if err := r.MsgClient.DeleteSecondaryQueue(ctx, secondaryQueue, m.Spec.MessageQueueConfig.QueueName); err != nil {
+	if err := r.MsgClient.DeleteSecondaryQueue(ctx, secondaryQueue, m.Spec.MessageQueueConfig.QueueName, m.Spec.MessageQueueConfig.ExchangeName); err != nil {
 		logger.Error(err, "Failed to delete secondary queue, continuing anyway")
 	}
 

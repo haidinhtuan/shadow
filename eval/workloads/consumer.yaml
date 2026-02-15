@@ -37,7 +37,7 @@ spec:
           from http.server import HTTPServer, BaseHTTPRequestHandler
 
           delay_ms = int(os.environ.get('PROCESSING_DELAY_MS', '50'))
-          broker = os.environ.get('RABBITMQ_URL', 'amqp://guest:guest@rabbitmq:5672/')
+          broker = os.environ.get('RABBITMQ_URL', 'amqp://guest:guest@rabbitmq.rabbitmq.svc.cluster.local:5672/')
           queue = os.environ.get('QUEUE_NAME', 'app.events')
 
           # In-memory state (this is what CRIU preserves)
@@ -76,7 +76,7 @@ spec:
         - name: PROCESSING_DELAY_MS
           value: "50"
         - name: RABBITMQ_URL
-          value: "amqp://guest:guest@rabbitmq:5672/"
+          value: "amqp://guest:guest@rabbitmq.rabbitmq.svc.cluster.local:5672/"
         - name: QUEUE_NAME
           value: "app.events"
         ports:

@@ -6,7 +6,7 @@ import (
 )
 
 func TestBuildCheckpointImage_InvalidPath(t *testing.T) {
-	_, err := buildCheckpointImage("/nonexistent/path/checkpoint.tar")
+	_, err := buildCheckpointImage("/nonexistent/path/checkpoint.tar", "test-container")
 	if err == nil {
 		t.Fatal("expected error for nonexistent file, got nil")
 	}
@@ -26,7 +26,7 @@ func TestBuildCheckpointImage_ValidTar(t *testing.T) {
 	}
 	tmpFile.Close()
 
-	img, err := buildCheckpointImage(tmpFile.Name())
+	img, err := buildCheckpointImage(tmpFile.Name(), "my-container")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

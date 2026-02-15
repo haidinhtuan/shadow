@@ -13,7 +13,7 @@ import (
 )
 
 // buildCheckpointImage creates a single-layer OCI image from a CRIU checkpoint tarball.
-func buildCheckpointImage(checkpointPath string) (v1.Image, error) {
+func buildCheckpointImage(checkpointPath, containerName string) (v1.Image, error) {
 	layer, err := tarball.LayerFromFile(checkpointPath)
 	if err != nil {
 		return nil, fmt.Errorf("creating layer from checkpoint: %w", err)
@@ -24,20 +24,30 @@ func buildCheckpointImage(checkpointPath string) (v1.Image, error) {
 		return nil, fmt.Errorf("appending layer to image: %w", err)
 	}
 
+	if containerName != "" {
+		img = mutate.Annotations(img, map[string]string{
+			"io.kubernetes.cri-o.annotations.checkpoint.name": containerName,
+		}).(v1.Image)
+	}
+
 	return img, nil
 }
 
 func main() {
-	if len(os.Args) != 3 {
-		fmt.Fprintf(os.Stderr, "usage: %s <checkpoint-tar-path> <image-ref>\n", os.Args[0])
+	if len(os.Args) < 3 || len(os.Args) > 4 {
+		fmt.Fprintf(os.Stderr, "usage: %s <checkpoint-tar-path> <image-ref> [container-name]\n", os.Args[0])
 		os.Exit(1)
 	}
 
 	checkpointPath := os.Args[1]
 	imageRef := os.Args[2]
+	containerName := ""
+	if len(os.Args) == 4 {
+		containerName = os.Args[3]
+	}
 
 	fmt.Printf("Building checkpoint image from %s\n", checkpointPath)
-	img, err := buildCheckpointImage(checkpointPath)
+	img, err := buildCheckpointImage(checkpointPath, containerName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error building image: %v\n", err)
 		os.Exit(1)
