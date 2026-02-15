@@ -29,6 +29,7 @@ type MockBrokerClient struct {
 	DeleteQueueErr error
 	DepthErr       error
 	SendErr        error
+	CloseErr       error
 }
 
 // NewMockBrokerClient returns a MockBrokerClient ready for use in tests.
@@ -54,6 +55,9 @@ func (m *MockBrokerClient) Close() error {
 	defer m.mu.Unlock()
 
 	m.Connected = false
+	if m.CloseErr != nil {
+		return m.CloseErr
+	}
 	return nil
 }
 

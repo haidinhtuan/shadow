@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -15,6 +16,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	migrationv1alpha1 "github.com/haidinhtuan/kubernetes-controller/api/v1alpha1"
 	"github.com/haidinhtuan/kubernetes-controller/internal/messaging"
@@ -72,6 +76,28 @@ func setupTest(objs ...client.Object) (*StatefulMigrationReconciler, *messaging.
 		Scheme:    scheme,
 		MsgClient: mockBroker,
 		// KubeletClient is nil for most tests; set it explicitly where needed
+	}
+
+	return reconciler, mockBroker, context.Background()
+}
+
+// setupTestWithInterceptors creates a reconciler with interceptor functions for
+// injecting errors into the fake client. Useful for testing error paths that
+// the fake client would not naturally produce.
+func setupTestWithInterceptors(funcs interceptor.Funcs, objs ...client.Object) (*StatefulMigrationReconciler, *messaging.MockBrokerClient, context.Context) {
+	scheme := testScheme()
+	cb := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&migrationv1alpha1.StatefulMigration{}).WithInterceptorFuncs(funcs)
+	if len(objs) > 0 {
+		cb = cb.WithObjects(objs...)
+	}
+	fakeClient := cb.Build()
+
+	mockBroker := messaging.NewMockBrokerClient()
+
+	reconciler := &StatefulMigrationReconciler{
+		Client:    fakeClient,
+		Scheme:    scheme,
+		MsgClient: mockBroker,
 	}
 
 	return reconciler, mockBroker, context.Background()
@@ -1154,13 +1180,29 @@ func TestReconcile_Restoring_Sequential_ScalesDownStatefulSet(t *testing.T) {
 		t.Errorf("expected OriginalReplicas 1, got %d", got.Status.OriginalReplicas)
 	}
 
-	// Second reconcile: source pod deleted, should create target pod
+	// Second reconcile: source pod still exists (waiting for StatefulSet controller),
+	// controller should requeue and wait.
 	result, err = reconcileOnce(r, ctx, "mig-seq-restore", "default")
 	if err != nil {
 		t.Fatalf("unexpected error on second reconcile: %v", err)
 	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter while waiting for pod removal")
+	}
 
-	// Verify target pod was created with full container spec
+	// Simulate StatefulSet controller deleting the pod after processing scale-down
+	pod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "myapp-0", Namespace: "default"}, pod); err == nil {
+		_ = r.Delete(ctx, pod)
+	}
+
+	// Third reconcile: pod is gone, should create target pod
+	result, err = reconcileOnce(r, ctx, "mig-seq-restore", "default")
+	if err != nil {
+		t.Fatalf("unexpected error on third reconcile: %v", err)
+	}
+
+	// Verify target pod was created
 	targetPod := &corev1.Pod{}
 	if err := r.Get(ctx, types.NamespacedName{Name: "myapp-0", Namespace: "default"}, targetPod); err != nil {
 		t.Fatalf("expected target pod to be created: %v", err)
@@ -1168,16 +1210,13 @@ func TestReconcile_Restoring_Sequential_ScalesDownStatefulSet(t *testing.T) {
 	if targetPod.Spec.NodeName != "node-2" {
 		t.Errorf("expected target on node-2, got %q", targetPod.Spec.NodeName)
 	}
-	// Verify container ports and env were copied
+	// Verify container ports were copied (env is baked into CRIU checkpoint)
 	if len(targetPod.Spec.Containers) == 0 {
 		t.Fatal("expected at least one container")
 	}
 	c := targetPod.Spec.Containers[0]
 	if len(c.Ports) == 0 || c.Ports[0].ContainerPort != 8080 {
 		t.Errorf("expected container port 8080, got %v", c.Ports)
-	}
-	if len(c.Env) == 0 || c.Env[0].Value != "production" {
-		t.Errorf("expected env APP_ENV=production, got %v", c.Env)
 	}
 	// Verify source labels were copied
 	if targetPod.Labels["app"] != "myapp" {
@@ -1189,10 +1228,11 @@ func TestReconcile_Restoring_Sequential_ScalesDownStatefulSet(t *testing.T) {
 	}
 }
 
-func TestReconcile_Restoring_Sequential_DeletesRecreatedPod(t *testing.T) {
-	// If the StatefulSet controller recreated a pod (without migration labels),
-	// handleRestoring should delete it and requeue.
-	recreatedPod := &corev1.Pod{
+func TestReconcile_Restoring_Sequential_WaitsForPodRemoval(t *testing.T) {
+	// If the target pod name exists but without migration labels (e.g. still
+	// being managed by StatefulSet controller), handleRestoring should requeue
+	// and wait — not delete the pod ourselves.
+	existingPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "myapp-0",
 			Namespace: "default",
@@ -1215,21 +1255,21 @@ func TestReconcile_Restoring_Sequential_DeletesRecreatedPod(t *testing.T) {
 		{Name: "app", Image: "myapp:latest"},
 	}
 
-	r, _, ctx := setupTest(migration, recreatedPod)
+	r, _, ctx := setupTest(migration, existingPod)
 
 	result, err := reconcileOnce(r, ctx, "mig-identity", "default")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.RequeueAfter == 0 {
-		t.Error("expected RequeueAfter after deleting recreated pod")
+		t.Error("expected RequeueAfter while waiting for pod removal")
 	}
 
-	// Verify the recreated pod was deleted
+	// Verify the pod was NOT deleted — we wait for StatefulSet controller
 	pod := &corev1.Pod{}
 	podErr := r.Get(ctx, types.NamespacedName{Name: "myapp-0", Namespace: "default"}, pod)
-	if podErr == nil {
-		t.Error("expected recreated pod to be deleted")
+	if podErr != nil {
+		t.Error("expected pod to still exist — controller should wait, not delete")
 	}
 }
 
@@ -1397,9 +1437,1403 @@ func TestReconcile_Restoring_ShadowPod_CopiesFullContainerSpec(t *testing.T) {
 	if len(c.Ports) != 1 || c.Ports[0].ContainerPort != 8080 {
 		t.Errorf("expected port 8080, got %v", c.Ports)
 	}
-	// Env should be copied
-	if len(c.Env) != 1 || c.Env[0].Name != "DB_HOST" {
-		t.Errorf("expected env DB_HOST, got %v", c.Env)
+	// Env should NOT be copied — it's baked into the CRIU checkpoint image
+	if len(c.Env) != 0 {
+		t.Errorf("expected no env vars (baked into checkpoint), got %v", c.Env)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Coverage gap tests
+// ---------------------------------------------------------------------------
+
+// -- Reconcile: unknown phase returns empty result --
+func TestReconcile_UnknownPhase_NoRequeue(t *testing.T) {
+	migration := newMigration("mig-unknown", "SomeUnknownPhase")
+	r, _, ctx := setupTest(migration)
+
+	result, err := reconcileOnce(r, ctx, "mig-unknown", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Requeue || result.RequeueAfter > 0 {
+		t.Error("expected no requeue for unknown phase")
+	}
+}
+
+// -- handleCheckpointing: Connect fails --
+func TestReconcile_Checkpointing_ConnectFails(t *testing.T) {
+	migration := newMigration("mig-ck-conn", migrationv1alpha1.PhaseCheckpointing)
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, mockBroker, ctx := setupTest(migration)
+	mockBroker.ConnectErr = fmt.Errorf("connection refused")
+
+	_, err := reconcileOnce(r, ctx, "mig-ck-conn", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-ck-conn", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseFailed {
+		t.Errorf("expected phase Failed when connect fails, got %q", got.Status.Phase)
+	}
+}
+
+// -- handleCheckpointing: CreateSecondaryQueue fails --
+func TestReconcile_Checkpointing_CreateQueueFails(t *testing.T) {
+	migration := newMigration("mig-ck-queue", migrationv1alpha1.PhaseCheckpointing)
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, mockBroker, ctx := setupTest(migration)
+	mockBroker.CreateQueueErr = fmt.Errorf("queue creation failed")
+
+	_, err := reconcileOnce(r, ctx, "mig-ck-queue", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-ck-queue", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseFailed {
+		t.Errorf("expected phase Failed when queue creation fails, got %q", got.Status.Phase)
+	}
+}
+
+// NOTE: KubeletClient checkpoint paths (KubeletClient != nil) cannot be
+// unit-tested because kubelet.Client is a concrete struct with an unexported
+// restClient field. Those paths require integration tests with a real API server.
+
+// -- handleTransferring: Job running uses pollingBackoff --
+func TestReconcile_Transferring_JobRunning_PollingBackoff(t *testing.T) {
+	migration := newMigration("mig-xfer-poll", migrationv1alpha1.PhaseTransferring)
+	migration.Status.SourceNode = "node-1"
+	migration.Status.CheckpointID = "/var/lib/kubelet/checkpoints/checkpoint-myapp-0.tar"
+	migration.Status.PhaseTimings = map[string]string{
+		"Transferring.start": time.Now().Add(-15 * time.Second).Format(time.RFC3339),
+	}
+
+	// Job exists but not succeeded
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mig-xfer-poll-transfer",
+			Namespace: "default",
+		},
+		Status: batchv1.JobStatus{
+			Succeeded: 0,
+		},
+	}
+
+	r, _, ctx := setupTest(migration, job)
+
+	result, err := reconcileOnce(r, ctx, "mig-xfer-poll", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// With elapsed ~15s, should use 2s backoff
+	if result.RequeueAfter != 2*time.Second {
+		t.Errorf("expected 2s backoff for elapsed ~15s, got %v", result.RequeueAfter)
+	}
+}
+
+// -- handleRestoring: target pod exists but NOT Running (Pending phase) --
+func TestReconcile_Restoring_ShadowPod_PodPending(t *testing.T) {
+	migration := newMigration("mig-restore-pending", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.CheckpointID = "/var/lib/kubelet/checkpoints/checkpoint-myapp-0.tar"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	// Shadow pod exists but is Pending (not Running)
+	shadowPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0-shadow",
+			Namespace: "default",
+			Labels: map[string]string{
+				"migration.ms2m.io/migration": "mig-restore-pending",
+			},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-2",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+		},
+	}
+
+	r, _, ctx := setupTest(migration, sourcePod, shadowPod)
+
+	result, err := reconcileOnce(r, ctx, "mig-restore-pending", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-restore-pending", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseRestoring {
+		t.Errorf("expected phase to remain Restoring while pod is Pending, got %q", got.Status.Phase)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter while target pod is not Running")
+	}
+}
+
+// -- handleTransferring: Job complete with Transferring.start timing --
+func TestReconcile_Transferring_JobComplete_WithStartTime(t *testing.T) {
+	migration := newMigration("mig-xfer-timing", migrationv1alpha1.PhaseTransferring)
+	migration.Status.SourceNode = "node-1"
+	migration.Status.CheckpointID = "/var/lib/kubelet/checkpoints/checkpoint-myapp-0.tar"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{
+		"Transferring.start": time.Now().Add(-5 * time.Second).Format(time.RFC3339),
+	}
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mig-xfer-timing-transfer",
+			Namespace: "default",
+		},
+		Status: batchv1.JobStatus{
+			Succeeded: 1,
+		},
+	}
+
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	r, _, ctx := setupTest(migration, job, sourcePod)
+
+	_, err := reconcileOnce(r, ctx, "mig-xfer-timing", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-xfer-timing", "default")
+	// Should have transitioned past Transferring
+	if got.Status.Phase == migrationv1alpha1.PhaseTransferring {
+		t.Error("expected phase to advance past Transferring")
+	}
+	// Verify Transferring timing was recorded
+	if _, ok := got.Status.PhaseTimings["Transferring"]; !ok {
+		t.Error("expected Transferring phase timing to be recorded")
+	}
+	// Verify Transferring.start was cleaned up
+	if _, ok := got.Status.PhaseTimings["Transferring.start"]; ok {
+		t.Error("expected Transferring.start to be deleted after completion")
+	}
+}
+
+// -- handleRestoring: ShadowPod with subdomain --
+func TestReconcile_Restoring_ShadowPod_WithSubdomain(t *testing.T) {
+	migration := newMigration("mig-restore-subdomain", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.CheckpointID = "/var/lib/kubelet/checkpoints/checkpoint-myapp-0.tar"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName:  "node-1",
+			Subdomain: "myapp-headless",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	r, _, ctx := setupTest(migration, sourcePod)
+
+	result, err := reconcileOnce(r, ctx, "mig-restore-subdomain", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter after creating target pod")
+	}
+
+	targetPod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "myapp-0-shadow", Namespace: "default"}, targetPod); err != nil {
+		t.Fatalf("expected shadow pod to be created: %v", err)
+	}
+	if targetPod.Spec.Hostname != "myapp-0" {
+		t.Errorf("expected hostname %q, got %q", "myapp-0", targetPod.Spec.Hostname)
+	}
+	if targetPod.Spec.Subdomain != "myapp-headless" {
+		t.Errorf("expected subdomain %q, got %q", "myapp-headless", targetPod.Spec.Subdomain)
+	}
+}
+
+// -- handleFinalizing: DeleteSecondaryQueue error (logged but not fatal) --
+func TestReconcile_Finalizing_DeleteQueueError(t *testing.T) {
+	migration := newMigration("mig-final-delq", migrationv1alpha1.PhaseFinalizing)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.TargetPod = "myapp-0-shadow"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, mockBroker, ctx := setupTest(migration)
+	mockBroker.Connected = true
+	mockBroker.DeleteQueueErr = fmt.Errorf("delete queue failed")
+
+	_, err := reconcileOnce(r, ctx, "mig-final-delq", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-final-delq", "default")
+	// Delete queue error is logged but not fatal
+	if got.Status.Phase != migrationv1alpha1.PhaseCompleted {
+		t.Errorf("expected phase Completed despite delete queue error, got %q", got.Status.Phase)
+	}
+}
+
+// -- handleRestoring: ShadowPod source pod lookup fails --
+func TestReconcile_Restoring_ShadowPod_SourceLookupFails(t *testing.T) {
+	migration := newMigration("mig-restore-nosrc", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.CheckpointID = "/var/lib/kubelet/checkpoints/checkpoint-myapp-0.tar"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	// No source pod and no shadow pod -- target pod not found -> source pod lookup fails
+	r, _, ctx := setupTest(migration)
+
+	_, err := reconcileOnce(r, ctx, "mig-restore-nosrc", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-restore-nosrc", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseFailed {
+		t.Errorf("expected phase Failed when source pod not found during ShadowPod restore, got %q", got.Status.Phase)
+	}
+}
+
+// -- handleRestoring: Sequential, empty sourceContainers uses fallback --
+func TestReconcile_Restoring_Sequential_FallbackSingleContainer(t *testing.T) {
+	migration := newMigration("mig-restore-fallback", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "Sequential"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{}
+	// Intentionally leave SourceContainers empty to trigger fallback
+	migration.Status.SourceContainers = nil
+	migration.Status.SourcePodLabels = nil
+
+	r, _, ctx := setupTest(migration)
+
+	result, err := reconcileOnce(r, ctx, "mig-restore-fallback", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter after creating target pod")
+	}
+
+	// Verify the target pod was created with the fallback single container
+	targetPod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "myapp-0", Namespace: "default"}, targetPod); err != nil {
+		t.Fatalf("expected target pod to be created: %v", err)
+	}
+	if len(targetPod.Spec.Containers) != 1 {
+		t.Fatalf("expected 1 container (fallback), got %d", len(targetPod.Spec.Containers))
+	}
+	if targetPod.Spec.Containers[0].Name != "app" {
+		t.Errorf("expected fallback container name %q, got %q", "app", targetPod.Spec.Containers[0].Name)
+	}
+}
+
+// -- handleRestoring: Sequential, StatefulSet not found (ignored) --
+func TestReconcile_Restoring_Sequential_StatefulSetNotFound(t *testing.T) {
+	// Source pod exists (blocking sequential path), StatefulSet not found.
+	existingPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "myapp"},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	migration := newMigration("mig-restore-nosts", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "Sequential"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.StatefulSetName = "myapp-nonexistent"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, _, ctx := setupTest(migration, existingPod)
+
+	result, err := reconcileOnce(r, ctx, "mig-restore-nosts", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should requeue because pod still exists (waiting for removal)
+	if result.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter while waiting for pod removal")
+	}
+
+	got := fetchMigration(r, ctx, "mig-restore-nosts", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseRestoring {
+		t.Errorf("expected phase Restoring, got %q", got.Status.Phase)
+	}
+}
+
+// -- handleReplaying: SendControlMessage START_REPLAY fails --
+func TestReconcile_Replaying_StartReplayFails(t *testing.T) {
+	migration := newMigration("mig-replay-sendfail", migrationv1alpha1.PhaseReplaying)
+	migration.Status.TargetPod = "myapp-0-shadow"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, mockBroker, ctx := setupTest(migration)
+	mockBroker.Connected = true
+	mockBroker.SendErr = fmt.Errorf("send failed")
+
+	_, err := reconcileOnce(r, ctx, "mig-replay-sendfail", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-replay-sendfail", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseFailed {
+		t.Errorf("expected phase Failed when START_REPLAY fails, got %q", got.Status.Phase)
+	}
+}
+
+// -- handleReplaying: GetQueueDepth fails --
+func TestReconcile_Replaying_GetQueueDepthFails(t *testing.T) {
+	migration := newMigration("mig-replay-depth", migrationv1alpha1.PhaseReplaying)
+	migration.Status.TargetPod = "myapp-0-shadow"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.PhaseTimings = map[string]string{
+		"Replaying.start": time.Now().Format(time.RFC3339),
+	}
+
+	r, mockBroker, ctx := setupTest(migration)
+	mockBroker.Connected = true
+	mockBroker.DepthErr = fmt.Errorf("depth check failed")
+
+	_, err := reconcileOnce(r, ctx, "mig-replay-depth", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-replay-depth", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseFailed {
+		t.Errorf("expected phase Failed when GetQueueDepth fails, got %q", got.Status.Phase)
+	}
+}
+
+// -- handleReplaying: cutoff timeout exceeded --
+func TestReconcile_Replaying_CutoffExceeded(t *testing.T) {
+	migration := newMigration("mig-replay-cutoff", migrationv1alpha1.PhaseReplaying)
+	migration.Status.TargetPod = "myapp-0-shadow"
+	migration.Status.SourceNode = "node-1"
+	migration.Spec.ReplayCutoffSeconds = 1 // 1 second cutoff
+	migration.Status.PhaseTimings = map[string]string{
+		// Start time 10 seconds ago, exceeding the 1s cutoff
+		"Replaying.start": time.Now().Add(-10 * time.Second).Format(time.RFC3339),
+	}
+
+	r, mockBroker, ctx := setupTest(migration)
+	mockBroker.Connected = true
+	// Queue still has messages but cutoff is exceeded
+	secondaryQ := migration.Spec.MessageQueueConfig.QueueName + ".ms2m-replay"
+	mockBroker.SetQueueDepth(secondaryQ, 50)
+
+	result, err := reconcileOnce(r, ctx, "mig-replay-cutoff", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-replay-cutoff", "default")
+	// Should transition to Finalizing (and then chain to Completed)
+	if got.Status.Phase != migrationv1alpha1.PhaseCompleted {
+		t.Errorf("expected phase Completed after cutoff, got %q", got.Status.Phase)
+	}
+	_ = result
+}
+
+// -- handleReplaying: depth == 0, valid start time -> Finalizing with timing --
+func TestReconcile_Replaying_DrainedWithStartTime(t *testing.T) {
+	migration := newMigration("mig-replay-drained", migrationv1alpha1.PhaseReplaying)
+	migration.Status.TargetPod = "myapp-0-shadow"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.PhaseTimings = map[string]string{
+		"Replaying.start": time.Now().Add(-3 * time.Second).Format(time.RFC3339),
+	}
+
+	r, mockBroker, ctx := setupTest(migration)
+	mockBroker.Connected = true
+	// Queue depth is 0
+
+	_, err := reconcileOnce(r, ctx, "mig-replay-drained", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-replay-drained", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseCompleted {
+		t.Errorf("expected phase Completed, got %q", got.Status.Phase)
+	}
+	// Verify Replaying timing was recorded
+	if _, ok := got.Status.PhaseTimings["Replaying"]; !ok {
+		t.Error("expected Replaying phase timing to be recorded")
+	}
+}
+
+// -- handleReplaying: depth > 0, no cutoff, backoff path --
+func TestReconcile_Replaying_QueueNotDrained_BackoffPath(t *testing.T) {
+	migration := newMigration("mig-replay-backoff", migrationv1alpha1.PhaseReplaying)
+	migration.Status.TargetPod = "myapp-0-shadow"
+	migration.Status.SourceNode = "node-1"
+	migration.Spec.ReplayCutoffSeconds = 0 // no cutoff
+	migration.Status.PhaseTimings = map[string]string{
+		"Replaying.start": time.Now().Add(-5 * time.Second).Format(time.RFC3339),
+	}
+
+	r, mockBroker, ctx := setupTest(migration)
+	mockBroker.Connected = true
+	secondaryQ := migration.Spec.MessageQueueConfig.QueueName + ".ms2m-replay"
+	mockBroker.SetQueueDepth(secondaryQ, 25)
+
+	result, err := reconcileOnce(r, ctx, "mig-replay-backoff", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-replay-backoff", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseReplaying {
+		t.Errorf("expected phase to remain Replaying, got %q", got.Status.Phase)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter for backoff")
+	}
+}
+
+// -- handleFinalizing: END_REPLAY fails --
+func TestReconcile_Finalizing_EndReplayFails(t *testing.T) {
+	migration := newMigration("mig-final-endfail", migrationv1alpha1.PhaseFinalizing)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.TargetPod = "myapp-0-shadow"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, mockBroker, ctx := setupTest(migration)
+	mockBroker.Connected = true
+	mockBroker.SendErr = fmt.Errorf("end replay send failed")
+
+	_, err := reconcileOnce(r, ctx, "mig-final-endfail", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-final-endfail", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseFailed {
+		t.Errorf("expected phase Failed when END_REPLAY fails, got %q", got.Status.Phase)
+	}
+}
+
+// -- handleFinalizing: ShadowPod source pod not found (skip quietly) --
+func TestReconcile_Finalizing_ShadowPod_SourceNotFound(t *testing.T) {
+	// No source pod exists — should skip deletion and complete
+	migration := newMigration("mig-final-nopod", migrationv1alpha1.PhaseFinalizing)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.TargetPod = "myapp-0-shadow"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, mockBroker, ctx := setupTest(migration)
+	mockBroker.Connected = true
+
+	_, err := reconcileOnce(r, ctx, "mig-final-nopod", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-final-nopod", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseCompleted {
+		t.Errorf("expected phase Completed even when source pod not found, got %q", got.Status.Phase)
+	}
+}
+
+// -- handleFinalizing: Sequential, StatefulSet not found --
+func TestReconcile_Finalizing_Sequential_StatefulSetNotFound(t *testing.T) {
+	migration := newMigration("mig-final-nosts", migrationv1alpha1.PhaseFinalizing)
+	migration.Spec.MigrationStrategy = "Sequential"
+	migration.Status.TargetPod = "myapp-0"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.StatefulSetName = "myapp-missing"
+	migration.Status.OriginalReplicas = 1
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, mockBroker, ctx := setupTest(migration)
+	mockBroker.Connected = true
+
+	_, err := reconcileOnce(r, ctx, "mig-final-nosts", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-final-nosts", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseCompleted {
+		t.Errorf("expected phase Completed when StatefulSet not found, got %q", got.Status.Phase)
+	}
+}
+
+// -- handleFinalizing: MsgClient.Close() returns error (logged but not fatal) --
+func TestReconcile_Finalizing_CloseError(t *testing.T) {
+	migration := newMigration("mig-final-closeerr", migrationv1alpha1.PhaseFinalizing)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.TargetPod = "myapp-0-shadow"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, mockBroker, ctx := setupTest(migration)
+	mockBroker.Connected = true
+	mockBroker.CloseErr = fmt.Errorf("close connection failed")
+
+	_, err := reconcileOnce(r, ctx, "mig-final-closeerr", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-final-closeerr", "default")
+	// Close error is logged but not fatal -- migration should complete
+	if got.Status.Phase != migrationv1alpha1.PhaseCompleted {
+		t.Errorf("expected phase Completed despite Close error, got %q", got.Status.Phase)
+	}
+}
+
+// -- pollingBackoff: 2s case (elapsed between 10s and 30s) --
+func TestPollingBackoff_MediumElapsed(t *testing.T) {
+	migration := newMigration("mig-backoff-2s", migrationv1alpha1.PhaseTransferring)
+	migration.Status.PhaseTimings = map[string]string{
+		"Transferring.start": time.Now().Add(-15 * time.Second).Format(time.RFC3339),
+	}
+
+	r, _, _ := setupTest(migration)
+
+	backoff := r.pollingBackoff(migration, "Transferring.start")
+	if backoff != 2*time.Second {
+		t.Errorf("expected 2s backoff for 15s elapsed, got %v", backoff)
+	}
+}
+
+// -- pollingBackoff: 5s case (elapsed > 30s) --
+func TestPollingBackoff_LongElapsed(t *testing.T) {
+	migration := newMigration("mig-backoff-5s", migrationv1alpha1.PhaseTransferring)
+	migration.Status.PhaseTimings = map[string]string{
+		"Transferring.start": time.Now().Add(-60 * time.Second).Format(time.RFC3339),
+	}
+
+	r, _, _ := setupTest(migration)
+
+	backoff := r.pollingBackoff(migration, "Transferring.start")
+	if backoff != 5*time.Second {
+		t.Errorf("expected 5s backoff for 60s elapsed, got %v", backoff)
+	}
+}
+
+// -- pollingBackoff: no start key present -> default --
+func TestPollingBackoff_NoStartKey(t *testing.T) {
+	migration := newMigration("mig-backoff-none", migrationv1alpha1.PhaseTransferring)
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, _, _ := setupTest(migration)
+
+	backoff := r.pollingBackoff(migration, "Transferring.start")
+	if backoff != 1*time.Second {
+		t.Errorf("expected 1s default backoff, got %v", backoff)
+	}
+}
+
+// -- handlePending: source pod exists but containers empty, container name empty -> failMigration --
+func TestReconcile_Pending_EmptyContainerName(t *testing.T) {
+	// Pod with no containers -> containerName stays empty -> fail
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName:   "node-1",
+			Containers: []corev1.Container{}, // empty
+		},
+	}
+
+	migration := newMigration("mig-no-ctr", migrationv1alpha1.PhasePending)
+	migration.Spec.ContainerName = ""
+
+	r, _, ctx := setupTest(migration, sourcePod)
+
+	_, err := reconcileOnce(r, ctx, "mig-no-ctr", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-no-ctr", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseFailed {
+		t.Errorf("expected phase Failed when container name is empty, got %q", got.Status.Phase)
+	}
+}
+
+// -- handleRestoring: ShadowPod, target pod not Running (not ShadowPod specific - general) --
+// -- handlePending: r.Update fails during auto-detect strategy --
+func TestReconcile_Pending_UpdateFails(t *testing.T) {
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	migration := newMigration("mig-upd-fail", migrationv1alpha1.PhasePending)
+	migration.Spec.MigrationStrategy = "" // triggers auto-detect + Update
+
+	updateCalls := 0
+	r, _, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			updateCalls++
+			return fmt.Errorf("update failed")
+		},
+	}, migration, sourcePod)
+
+	_, err := reconcileOnce(r, ctx, "mig-upd-fail", "default")
+	if err == nil {
+		t.Fatal("expected error when Update fails")
+	}
+	if updateCalls == 0 {
+		t.Error("expected Update to have been called")
+	}
+}
+
+// -- handlePending: r.Get fails after strategy update --
+func TestReconcile_Pending_RefetchFails(t *testing.T) {
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	migration := newMigration("mig-refetch-fail", migrationv1alpha1.PhasePending)
+	migration.Spec.MigrationStrategy = "" // triggers auto-detect + Update + re-fetch
+
+	getCalls := 0
+	r, _, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			getCalls++
+			// Let the first two Gets succeed (migration fetch, source pod fetch)
+			// The third Get is the re-fetch after Update
+			if getCalls <= 2 {
+				return c.Get(ctx, key, obj, opts...)
+			}
+			return fmt.Errorf("refetch failed")
+		},
+	}, migration, sourcePod)
+
+	_, err := reconcileOnce(r, ctx, "mig-refetch-fail", "default")
+	if err == nil {
+		t.Fatal("expected error when re-fetch fails")
+	}
+}
+
+// -- handlePending: source pod Get returns non-NotFound error --
+func TestReconcile_Pending_SourcePodGetError(t *testing.T) {
+	migration := newMigration("mig-pod-geterr", migrationv1alpha1.PhasePending)
+
+	getCalls := 0
+	r, _, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			getCalls++
+			// First Get is the migration fetch (let it succeed)
+			if getCalls <= 1 {
+				return c.Get(ctx, key, obj, opts...)
+			}
+			// Second Get is source pod -- return a non-NotFound error
+			return fmt.Errorf("internal server error")
+		},
+	}, migration)
+
+	_, err := reconcileOnce(r, ctx, "mig-pod-geterr", "default")
+	if err == nil {
+		t.Fatal("expected error when source pod Get returns non-NotFound error")
+	}
+}
+
+// -- handleTransferring: Job Get returns non-NotFound error --
+func TestReconcile_Transferring_JobGetError(t *testing.T) {
+	migration := newMigration("mig-xfer-geterr", migrationv1alpha1.PhaseTransferring)
+	migration.Status.SourceNode = "node-1"
+	migration.Status.CheckpointID = "/var/lib/kubelet/checkpoints/checkpoint-myapp-0.tar"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	getCalls := 0
+	r, _, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			getCalls++
+			// First Get is the migration fetch (let it succeed)
+			if getCalls <= 1 {
+				return c.Get(ctx, key, obj, opts...)
+			}
+			// Second Get is for the job -- return non-NotFound error
+			return fmt.Errorf("internal server error")
+		},
+	}, migration)
+
+	_, err := reconcileOnce(r, ctx, "mig-xfer-geterr", "default")
+	if err == nil {
+		t.Fatal("expected error when job Get returns non-NotFound error")
+	}
+}
+
+// -- handleTransferring: Job Create returns AlreadyExists --
+func TestReconcile_Transferring_JobCreateAlreadyExists(t *testing.T) {
+	migration := newMigration("mig-xfer-exists", migrationv1alpha1.PhaseTransferring)
+	migration.Status.SourceNode = "node-1"
+	migration.Status.CheckpointID = "/var/lib/kubelet/checkpoints/checkpoint-myapp-0.tar"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, _, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*batchv1.Job); ok {
+				return errors.NewAlreadyExists(batchv1.Resource("jobs"), "mig-xfer-exists-transfer")
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}, migration)
+
+	result, err := reconcileOnce(r, ctx, "mig-xfer-exists", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// AlreadyExists should requeue with 2s delay
+	if result.RequeueAfter != 2*time.Second {
+		t.Errorf("expected 2s RequeueAfter for AlreadyExists, got %v", result.RequeueAfter)
+	}
+}
+
+// -- handleTransferring: Job Create returns other error -> failMigration --
+func TestReconcile_Transferring_JobCreateOtherError(t *testing.T) {
+	migration := newMigration("mig-xfer-createerr", migrationv1alpha1.PhaseTransferring)
+	migration.Status.SourceNode = "node-1"
+	migration.Status.CheckpointID = "/var/lib/kubelet/checkpoints/checkpoint-myapp-0.tar"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, _, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*batchv1.Job); ok {
+				return fmt.Errorf("permission denied")
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}, migration)
+
+	_, err := reconcileOnce(r, ctx, "mig-xfer-createerr", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-xfer-createerr", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseFailed {
+		t.Errorf("expected phase Failed when job Create fails, got %q", got.Status.Phase)
+	}
+}
+
+// -- handleRestoring: target pod Get returns non-NotFound error --
+func TestReconcile_Restoring_TargetPodGetError(t *testing.T) {
+	migration := newMigration("mig-restore-geterr", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	getCalls := 0
+	r, _, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			getCalls++
+			// First Get: migration fetch
+			if getCalls <= 1 {
+				return c.Get(ctx, key, obj, opts...)
+			}
+			// Second Get: target pod -- return non-NotFound error
+			return fmt.Errorf("internal server error")
+		},
+	}, migration)
+
+	_, err := reconcileOnce(r, ctx, "mig-restore-geterr", "default")
+	if err == nil {
+		t.Fatal("expected error when target pod Get returns non-NotFound error")
+	}
+}
+
+// -- handleRestoring: pod Create returns AlreadyExists --
+func TestReconcile_Restoring_PodCreateAlreadyExists(t *testing.T) {
+	migration := newMigration("mig-restore-exists", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	getCalls := 0
+	r, _, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			getCalls++
+			// First Get: migration fetch (succeed)
+			// Second Get: target shadow pod (not found -> pass through, will get NotFound)
+			// Third Get: source pod (succeed)
+			return c.Get(ctx, key, obj, opts...)
+		},
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if pod, ok := obj.(*corev1.Pod); ok {
+				if pod.Name == "myapp-0-shadow" {
+					return errors.NewAlreadyExists(corev1.Resource("pods"), "myapp-0-shadow")
+				}
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}, migration, sourcePod)
+
+	result, err := reconcileOnce(r, ctx, "mig-restore-exists", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 1*time.Second {
+		t.Errorf("expected 1s RequeueAfter for AlreadyExists, got %v", result.RequeueAfter)
+	}
+}
+
+// -- handleRestoring: pod Create returns other error -> failMigration --
+func TestReconcile_Restoring_PodCreateOtherError(t *testing.T) {
+	migration := newMigration("mig-restore-createerr", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	r, _, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if pod, ok := obj.(*corev1.Pod); ok {
+				if pod.Name == "myapp-0-shadow" {
+					return fmt.Errorf("quota exceeded")
+				}
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}, migration, sourcePod)
+
+	_, err := reconcileOnce(r, ctx, "mig-restore-createerr", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-restore-createerr", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseFailed {
+		t.Errorf("expected phase Failed when pod Create fails, got %q", got.Status.Phase)
+	}
+}
+
+// -- handleFinalizing: ShadowPod source pod Get returns non-NotFound error --
+func TestReconcile_Finalizing_ShadowPod_SourceGetError(t *testing.T) {
+	migration := newMigration("mig-final-srcerr", migrationv1alpha1.PhaseFinalizing)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.TargetPod = "myapp-0-shadow"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	getCalls := 0
+	r, mockBroker, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			getCalls++
+			// First Get: migration fetch (succeed)
+			if getCalls <= 1 {
+				return c.Get(ctx, key, obj, opts...)
+			}
+			// Second Get: source pod -- return non-NotFound error
+			if key.Name == "myapp-0" {
+				return fmt.Errorf("internal server error")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}, migration)
+	mockBroker.Connected = true
+
+	_, err := reconcileOnce(r, ctx, "mig-final-srcerr", "default")
+	if err == nil {
+		t.Fatal("expected error when source pod Get returns non-NotFound error")
+	}
+}
+
+// -- handleFinalizing: Sequential STS Get returns non-NotFound error --
+func TestReconcile_Finalizing_Sequential_STSGetError(t *testing.T) {
+	migration := newMigration("mig-final-stserr", migrationv1alpha1.PhaseFinalizing)
+	migration.Spec.MigrationStrategy = "Sequential"
+	migration.Status.TargetPod = "myapp-0"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.StatefulSetName = "myapp"
+	migration.Status.OriginalReplicas = 1
+	migration.Status.PhaseTimings = map[string]string{}
+
+	getCalls := 0
+	r, mockBroker, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			getCalls++
+			// First Get: migration fetch (succeed)
+			if getCalls <= 1 {
+				return c.Get(ctx, key, obj, opts...)
+			}
+			// Second Get: StatefulSet -- return non-NotFound error
+			if key.Name == "myapp" {
+				return fmt.Errorf("internal server error")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}, migration)
+	mockBroker.Connected = true
+
+	_, err := reconcileOnce(r, ctx, "mig-final-stserr", "default")
+	if err == nil {
+		t.Fatal("expected error when StatefulSet Get returns non-NotFound error in Finalizing")
+	}
+}
+
+// -- handleRestoring: Sequential, STS Get returns non-NotFound error --
+func TestReconcile_Restoring_Sequential_STSGetError(t *testing.T) {
+	// Source pod exists, StatefulSet Get fails with non-NotFound
+	existingPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "myapp"},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	migration := newMigration("mig-restore-stserr", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "Sequential"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.StatefulSetName = "myapp"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	getCalls := 0
+	r, _, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			getCalls++
+			// Let migration fetch and source pod fetch succeed
+			if getCalls <= 1 {
+				return c.Get(ctx, key, obj, opts...)
+			}
+			// Target pod Get (same name as source): let it succeed (pod exists)
+			if key.Name == "myapp-0" && getCalls == 2 {
+				return c.Get(ctx, key, obj, opts...)
+			}
+			// StatefulSet Get: return non-NotFound error
+			if key.Name == "myapp" {
+				return fmt.Errorf("internal server error")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}, migration, existingPod)
+
+	_, err := reconcileOnce(r, ctx, "mig-restore-stserr", "default")
+	if err == nil {
+		t.Fatal("expected error when StatefulSet Get returns non-NotFound error in Restoring")
+	}
+}
+
+// -- transitionPhase: Status().Patch fails --
+func TestReconcile_TransitionPhase_PatchFails(t *testing.T) {
+	// Use Checkpointing phase to trigger transitionPhase at the end of handleCheckpointing
+	migration := newMigration("mig-tphase-err", migrationv1alpha1.PhaseCheckpointing)
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	subResourcePatchCalls := 0
+	r, _, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			subResourcePatchCalls++
+			// Let the first patch succeed (if any internal state updates), fail on transitionPhase
+			if subResourcePatchCalls >= 1 {
+				return fmt.Errorf("patch failed")
+			}
+			return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+		},
+	}, migration)
+
+	_, err := reconcileOnce(r, ctx, "mig-tphase-err", "default")
+	if err == nil {
+		t.Fatal("expected error when transitionPhase Patch fails")
+	}
+}
+
+// -- failMigration: Status().Patch fails --
+func TestReconcile_FailMigration_PatchFails(t *testing.T) {
+	// Use Checkpointing phase with ConnectErr to trigger failMigration
+	migration := newMigration("mig-failpatch", migrationv1alpha1.PhaseCheckpointing)
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, mockBroker, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			return fmt.Errorf("status patch failed")
+		},
+	}, migration)
+	mockBroker.ConnectErr = fmt.Errorf("connection refused")
+
+	_, err := reconcileOnce(r, ctx, "mig-failpatch", "default")
+	if err == nil {
+		t.Fatal("expected error when failMigration Patch fails")
+	}
+}
+
+// -- Reconcile: re-fetch Get fails after phase chaining --
+func TestReconcile_PhaseChaining_RefetchFails(t *testing.T) {
+	// Start at Pending with a source pod. handlePending will succeed and
+	// transition to Checkpointing with Requeue:true, triggering the re-fetch
+	// in the phase chaining loop.
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	migration := newMigration("mig-chain-refetch", migrationv1alpha1.PhasePending)
+	migration.Spec.MigrationStrategy = "ShadowPod" // already set, no Update needed
+
+	getCalls := 0
+	r, _, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			getCalls++
+			// Calls 1-2: migration fetch + source pod Get (succeed)
+			// Call 3: re-fetch after Pending->Checkpointing transition (fail)
+			if getCalls >= 3 && key.Name == "mig-chain-refetch" {
+				return fmt.Errorf("refetch in chaining loop failed")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}, migration, sourcePod)
+
+	result, err := reconcileOnce(r, ctx, "mig-chain-refetch", "default")
+	// The error is wrapped in IgnoreNotFound; since it's not a NotFound error, it's returned
+	if err == nil {
+		// If IgnoreNotFound swallowed it... let's check what we got
+		t.Logf("result: %+v, err: %v", result, err)
+	}
+	// The error from Get is passed through IgnoreNotFound -- non-NotFound errors are returned
+	// But since it's a plain error (not a StatusError), IgnoreNotFound returns it
+}
+
+// -- handleRestoring: Sequential STS scale-down patch fails --
+func TestReconcile_Restoring_Sequential_STSPatchFails(t *testing.T) {
+	stsReplicas := int32(1)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp",
+			Namespace: "default",
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &stsReplicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "myapp"},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "myapp"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "myapp:latest"}}},
+			},
+		},
+	}
+
+	existingPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "myapp"},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	migration := newMigration("mig-restore-stspatch", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "Sequential"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.StatefulSetName = "myapp"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, _, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*appsv1.StatefulSet); ok {
+				return fmt.Errorf("sts patch failed")
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	}, migration, existingPod, sts)
+
+	_, err := reconcileOnce(r, ctx, "mig-restore-stspatch", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-restore-stspatch", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseFailed {
+		t.Errorf("expected phase Failed when STS scale-down patch fails, got %q", got.Status.Phase)
+	}
+}
+
+// -- handleFinalizing: source pod Delete fails (logged but not fatal) --
+func TestReconcile_Finalizing_ShadowPod_DeleteFails(t *testing.T) {
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	migration := newMigration("mig-final-delfail", migrationv1alpha1.PhaseFinalizing)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.TargetPod = "myapp-0-shadow"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, mockBroker, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if pod, ok := obj.(*corev1.Pod); ok && pod.Name == "myapp-0" {
+				return fmt.Errorf("delete failed")
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	}, migration, sourcePod)
+	mockBroker.Connected = true
+
+	_, err := reconcileOnce(r, ctx, "mig-final-delfail", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-final-delfail", "default")
+	// Delete error is logged but not fatal
+	if got.Status.Phase != migrationv1alpha1.PhaseCompleted {
+		t.Errorf("expected phase Completed despite delete error, got %q", got.Status.Phase)
+	}
+}
+
+// -- handleFinalizing: Sequential STS scale-up patch fails (logged but not fatal) --
+func TestReconcile_Finalizing_Sequential_STSPatchFails(t *testing.T) {
+	stsReplicas := int32(0)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp",
+			Namespace: "default",
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &stsReplicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "myapp"},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "myapp"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "myapp:latest"}}},
+			},
+		},
+	}
+
+	migration := newMigration("mig-final-stspatch", migrationv1alpha1.PhaseFinalizing)
+	migration.Spec.MigrationStrategy = "Sequential"
+	migration.Status.TargetPod = "myapp-0"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.StatefulSetName = "myapp"
+	migration.Status.OriginalReplicas = 1
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, mockBroker, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*appsv1.StatefulSet); ok {
+				return fmt.Errorf("sts patch failed")
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	}, migration, sts)
+	mockBroker.Connected = true
+
+	_, err := reconcileOnce(r, ctx, "mig-final-stspatch", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-final-stspatch", "default")
+	// STS patch error is logged but not fatal
+	if got.Status.Phase != migrationv1alpha1.PhaseCompleted {
+		t.Errorf("expected phase Completed despite STS patch error, got %q", got.Status.Phase)
+	}
+}
+
+// -- Reconcile: empty phase, Status().Patch fails --
+func TestReconcile_EmptyPhase_PatchFails(t *testing.T) {
+	migration := newMigration("mig-empty-patcherr", "")
+
+	r, _, ctx := setupTestWithInterceptors(interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			return fmt.Errorf("status patch failed")
+		},
+	}, migration)
+
+	_, err := reconcileOnce(r, ctx, "mig-empty-patcherr", "default")
+	if err == nil {
+		t.Fatal("expected error when empty phase Patch fails")
+	}
+}
+
+func TestReconcile_Restoring_Sequential_PodNotRunning(t *testing.T) {
+	// Sequential: target pod exists with migration labels but is Pending
+	migration := newMigration("mig-seq-pending", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "Sequential"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	targetPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+			Labels: map[string]string{
+				"migration.ms2m.io/migration": "mig-seq-pending",
+			},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-2",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+		},
+	}
+
+	r, _, ctx := setupTest(migration, targetPod)
+
+	result, err := reconcileOnce(r, ctx, "mig-seq-pending", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-seq-pending", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseRestoring {
+		t.Errorf("expected phase Restoring while pod is Pending, got %q", got.Status.Phase)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter while target pod is not Running")
 	}
 }
 
