@@ -271,7 +271,7 @@ If any phase transitions to `Failed`:
 ```yaml
 rules:
   # CRD management
-  - apiGroups: ["migration.vibe.io"]
+  - apiGroups: ["migration.ms2m.io"]
     resources: ["statefulmigrations", "statefulmigrations/status"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Checkpoint API (proxied through API server)

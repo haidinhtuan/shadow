@@ -1,4 +1,4 @@
-module github.com/vibe-kanban/kubernetes-controller
+module github.com/haidinhtuan/kubernetes-controller
 
 go 1.25.0
 

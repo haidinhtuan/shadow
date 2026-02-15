@@ -17,10 +17,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	migrationv1alpha1 "github.com/vibe-kanban/kubernetes-controller/api/v1alpha1"
-	"github.com/vibe-kanban/kubernetes-controller/internal/controller"
-	"github.com/vibe-kanban/kubernetes-controller/internal/kubelet"
-	"github.com/vibe-kanban/kubernetes-controller/internal/messaging"
+	migrationv1alpha1 "github.com/haidinhtuan/kubernetes-controller/api/v1alpha1"
+	"github.com/haidinhtuan/kubernetes-controller/internal/controller"
+	"github.com/haidinhtuan/kubernetes-controller/internal/kubelet"
+	"github.com/haidinhtuan/kubernetes-controller/internal/messaging"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -58,7 +58,7 @@ func main() {
 		Metrics:                server.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "a1b2c3d4.vibe.io",
+		LeaderElectionID:       "a1b2c3d4.ms2m.io",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")

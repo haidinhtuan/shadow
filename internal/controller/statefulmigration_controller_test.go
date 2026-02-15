@@ -15,8 +15,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	migrationv1alpha1 "github.com/vibe-kanban/kubernetes-controller/api/v1alpha1"
-	"github.com/vibe-kanban/kubernetes-controller/internal/messaging"
+	migrationv1alpha1 "github.com/haidinhtuan/kubernetes-controller/api/v1alpha1"
+	"github.com/haidinhtuan/kubernetes-controller/internal/messaging"
 )
 
 // testScheme builds a scheme with all types needed by the controller tests.

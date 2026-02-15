@@ -103,12 +103,12 @@ The controller sends an `END_REPLAY` control message, switches traffic from the 
 
 ## CRD Reference
 
-The controller defines a single Custom Resource: `StatefulMigration` in API group `migration.vibe.io/v1alpha1`.
+The controller defines a single Custom Resource: `StatefulMigration` in API group `migration.ms2m.io/v1alpha1`.
 
 ### Spec
 
 ```yaml
-apiVersion: migration.vibe.io/v1alpha1
+apiVersion: migration.ms2m.io/v1alpha1
 kind: StatefulMigration
 metadata:
   name: migrate-worker-0
@@ -172,7 +172,7 @@ If `migrationStrategy` is left empty, the controller inspects the source pod's `
 ### 1. Install the CRD
 
 ```bash
-kubectl apply -f config/crd/bases/migration.vibe.io_statefulmigrations.yaml
+kubectl apply -f config/crd/bases/migration.ms2m.io_statefulmigrations.yaml
 ```
 
 ### 2. Deploy the controller
@@ -185,7 +185,7 @@ kubectl apply -f config/manager/manager.yaml
 ### 3. Create a migration
 
 ```yaml
-apiVersion: migration.vibe.io/v1alpha1
+apiVersion: migration.ms2m.io/v1alpha1
 kind: StatefulMigration
 metadata:
   name: migrate-worker-0
@@ -279,7 +279,7 @@ The controller can run outside the cluster for development, using your local kub
 kubectl cluster-info
 
 # Install the CRD
-kubectl apply -f config/crd/bases/migration.vibe.io_statefulmigrations.yaml
+kubectl apply -f config/crd/bases/migration.ms2m.io_statefulmigrations.yaml
 
 # Run the controller
 make run
@@ -321,7 +321,7 @@ docker push $REGISTRY/checkpoint-transfer:latest
 3. Apply all resources:
 
 ```bash
-kubectl apply -f config/crd/bases/migration.vibe.io_statefulmigrations.yaml
+kubectl apply -f config/crd/bases/migration.ms2m.io_statefulmigrations.yaml
 kubectl apply -f config/rbac/role.yaml
 kubectl apply -f config/manager/manager.yaml
 ```

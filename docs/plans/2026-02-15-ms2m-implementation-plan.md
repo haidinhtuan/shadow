@@ -57,7 +57,7 @@ Add `MigrationStrategy`, `StartTime`, `PhaseTimings`, and `ExchangeName`/`Routin
 **Files:**
 - Modify: `api/v1alpha1/types.go`
 - Modify: `api/v1alpha1/deepcopy.go`
-- Modify: `config/crd/bases/migration.vibe.io_statefulmigrations.yaml`
+- Modify: `config/crd/bases/migration.ms2m.io_statefulmigrations.yaml`
 
 **Step 1: Write test for new CRD fields**
 
@@ -241,7 +241,7 @@ func (in *StatefulMigrationStatus) DeepCopyInto(out *StatefulMigrationStatus) {
 
 **Step 5: Update the CRD YAML**
 
-Add the new fields to `config/crd/bases/migration.vibe.io_statefulmigrations.yaml` under `spec.properties` and `status.properties`. Add `migrationStrategy` (type: string, enum: ShadowPod, Sequential) to spec. Add `exchangeName` and `routingKey` (type: string) under messageQueueConfig. Add `startTime` (format: date-time) and `phaseTimings` (type: object, additionalProperties: string) to status.
+Add the new fields to `config/crd/bases/migration.ms2m.io_statefulmigrations.yaml` under `spec.properties` and `status.properties`. Add `migrationStrategy` (type: string, enum: ShadowPod, Sequential) to spec. Add `exchangeName` and `routingKey` (type: string) under messageQueueConfig. Add `startTime` (format: date-time) and `phaseTimings` (type: object, additionalProperties: string) to status.
 
 **Step 6: Run tests**
 
@@ -902,8 +902,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	migrationv1alpha1 "github.com/vibe-kanban/kubernetes-controller/api/v1alpha1"
-	"github.com/vibe-kanban/kubernetes-controller/internal/messaging"
+	migrationv1alpha1 "github.com/haidinhtuan/kubernetes-controller/api/v1alpha1"
+	"github.com/haidinhtuan/kubernetes-controller/internal/messaging"
 )
 
 func setupTest(migration *migrationv1alpha1.StatefulMigration) (*StatefulMigrationReconciler, context.Context) {
@@ -1308,7 +1308,7 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	migrationv1alpha1 "github.com/vibe-kanban/kubernetes-controller/api/v1alpha1"
+	migrationv1alpha1 "github.com/haidinhtuan/kubernetes-controller/api/v1alpha1"
 )
 
 var cfg *rest.Config

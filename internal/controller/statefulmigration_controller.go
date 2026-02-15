@@ -16,9 +16,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	migrationv1alpha1 "github.com/vibe-kanban/kubernetes-controller/api/v1alpha1"
-	"github.com/vibe-kanban/kubernetes-controller/internal/kubelet"
-	"github.com/vibe-kanban/kubernetes-controller/internal/messaging"
+	migrationv1alpha1 "github.com/haidinhtuan/kubernetes-controller/api/v1alpha1"
+	"github.com/haidinhtuan/kubernetes-controller/internal/kubelet"
+	"github.com/haidinhtuan/kubernetes-controller/internal/messaging"
 )
 
 // StatefulMigrationReconciler reconciles a StatefulMigration object
@@ -29,9 +29,9 @@ type StatefulMigrationReconciler struct {
 	KubeletClient *kubelet.Client
 }
 
-// +kubebuilder:rbac:groups=migration.vibe.io,resources=statefulmigrations,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=migration.vibe.io,resources=statefulmigrations/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=migration.vibe.io,resources=statefulmigrations/finalizers,verbs=update
+// +kubebuilder:rbac:groups=migration.ms2m.io,resources=statefulmigrations,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=migration.ms2m.io,resources=statefulmigrations/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=migration.ms2m.io,resources=statefulmigrations/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create
 
@@ -219,8 +219,8 @@ func (r *StatefulMigrationReconciler) handleTransferring(ctx context.Context, m 
 				Name:      jobName,
 				Namespace: m.Namespace,
 				Labels: map[string]string{
-					"migration.vibe.io/migration": m.Name,
-					"migration.vibe.io/phase":     "transferring",
+					"migration.ms2m.io/migration": m.Name,
+					"migration.ms2m.io/phase":     "transferring",
 				},
 			},
 			Spec: batchv1.JobSpec{
@@ -343,11 +343,11 @@ func (r *StatefulMigrationReconciler) handleRestoring(ctx context.Context, m *mi
 				Name:      targetPodName,
 				Namespace: m.Namespace,
 				Labels: map[string]string{
-					"migration.vibe.io/migration": m.Name,
-					"migration.vibe.io/role":      "target",
+					"migration.ms2m.io/migration": m.Name,
+					"migration.ms2m.io/role":      "target",
 				},
 				Annotations: map[string]string{
-					"migration.vibe.io/checkpoint-image": checkpointImage,
+					"migration.ms2m.io/checkpoint-image": checkpointImage,
 				},
 			},
 			Spec: corev1.PodSpec{

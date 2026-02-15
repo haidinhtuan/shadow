@@ -32,7 +32,7 @@ Single test: `go test ./internal/controller/ -run TestName -v`
 
 ### CRD & API (`api/v1alpha1/`)
 
-- **Group**: `migration.vibe.io`, **Version**: `v1alpha1`
+- **Group**: `migration.ms2m.io`, **Version**: `v1alpha1`
 - **Kind**: `StatefulMigration` — spec includes `sourcePod`, `targetNode`, `checkpointImageRepository`, `replayCutoffSeconds`, `messageQueueConfig`
 - **Status**: tracks `phase`, `sourceNode`, `checkpointID`, `targetPod`, and standard `conditions`
 - `deepcopy.go` is hand-written (not generated via controller-gen)

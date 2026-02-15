@@ -1,9 +1,9 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: statefulmigrations.migration.vibe.io
+  name: statefulmigrations.migration.ms2m.io
 spec:
-  group: migration.vibe.io
+  group: migration.ms2m.io
   names:
     kind: StatefulMigration
     listKind: StatefulMigrationList
