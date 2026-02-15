@@ -59,13 +59,13 @@ func (r *StatefulMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 		switch migration.Status.Phase {
 		case "":
-			// Initial state, move to Pending
+			// Initial state, move to Pending and requeue
 			patch := client.MergeFrom(migration.DeepCopy())
 			migration.Status.Phase = migrationv1alpha1.PhasePending
 			if err := r.Status().Patch(ctx, migration, patch); err != nil {
 				return ctrl.Result{}, err
 			}
-			result = ctrl.Result{Requeue: true}
+			return ctrl.Result{Requeue: true}, nil
 
 		case migrationv1alpha1.PhasePending:
 			result, err = r.handlePending(ctx, migration)
@@ -129,9 +129,6 @@ func (r *StatefulMigrationReconciler) handlePending(ctx context.Context, m *migr
 		return ctrl.Result{}, err
 	}
 
-	// Record source node
-	m.Status.SourceNode = sourcePod.Spec.NodeName
-
 	// Resolve container name
 	containerName := m.Spec.ContainerName
 	if containerName == "" && len(sourcePod.Spec.Containers) > 0 {
@@ -139,14 +136,6 @@ func (r *StatefulMigrationReconciler) handlePending(ctx context.Context, m *migr
 	}
 	if containerName == "" {
 		return r.failMigration(ctx, m, "could not determine container name for source pod")
-	}
-	m.Status.ContainerName = containerName
-
-	// Initialize timing metadata
-	now := metav1.Now()
-	m.Status.StartTime = &now
-	if m.Status.PhaseTimings == nil {
-		m.Status.PhaseTimings = make(map[string]string)
 	}
 
 	// Auto-detect migration strategy from ownerReferences if not explicitly set
@@ -169,10 +158,14 @@ func (r *StatefulMigrationReconciler) handlePending(ctx context.Context, m *migr
 		}
 	}
 
-	// Re-apply status fields (may have been reset by re-fetch above)
+	// Take patch base AFTER any spec update / re-fetch, BEFORE status modifications
+	base := m.DeepCopy()
+
+	// Apply all status fields
 	m.Status.SourceNode = sourcePod.Spec.NodeName
-	m.Status.StartTime = &now
 	m.Status.ContainerName = containerName
+	now := metav1.Now()
+	m.Status.StartTime = &now
 	if m.Status.PhaseTimings == nil {
 		m.Status.PhaseTimings = make(map[string]string)
 	}
@@ -181,7 +174,7 @@ func (r *StatefulMigrationReconciler) handlePending(ctx context.Context, m *migr
 		"sourceNode", m.Status.SourceNode,
 		"strategy", m.Spec.MigrationStrategy)
 
-	return r.transitionPhase(ctx, m, migrationv1alpha1.PhaseCheckpointing)
+	return r.transitionPhase(ctx, m, base, migrationv1alpha1.PhaseCheckpointing)
 }
 
 // handleCheckpointing connects to the message broker, creates the secondary
@@ -189,6 +182,7 @@ func (r *StatefulMigrationReconciler) handlePending(ctx context.Context, m *migr
 // the kubelet API.
 func (r *StatefulMigrationReconciler) handleCheckpointing(ctx context.Context, m *migrationv1alpha1.StatefulMigration) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	base := m.DeepCopy()
 	phaseStart := time.Now()
 
 	// Connect to the message broker (idempotent if already connected)
@@ -227,7 +221,7 @@ func (r *StatefulMigrationReconciler) handleCheckpointing(ctx context.Context, m
 	r.recordPhaseTiming(m, "Checkpointing", time.Since(phaseStart))
 	logger.Info("Checkpointing complete", "checkpointID", m.Status.CheckpointID)
 
-	return r.transitionPhase(ctx, m, migrationv1alpha1.PhaseTransferring)
+	return r.transitionPhase(ctx, m, base, migrationv1alpha1.PhaseTransferring)
 }
 
 // handleTransferring creates a Kubernetes Job that runs the checkpoint-transfer
@@ -327,6 +321,7 @@ func (r *StatefulMigrationReconciler) handleTransferring(ctx context.Context, m 
 
 	// Job exists, check if it completed
 	if existingJob.Status.Succeeded >= 1 {
+		base := m.DeepCopy()
 		// Parse the phase start time to calculate duration
 		var duration time.Duration
 		if startStr, ok := m.Status.PhaseTimings["Transferring.start"]; ok {
@@ -337,7 +332,7 @@ func (r *StatefulMigrationReconciler) handleTransferring(ctx context.Context, m 
 		}
 		r.recordPhaseTiming(m, "Transferring", duration)
 		logger.Info("Transfer job completed", "job", jobName)
-		return r.transitionPhase(ctx, m, migrationv1alpha1.PhaseRestoring)
+		return r.transitionPhase(ctx, m, base, migrationv1alpha1.PhaseRestoring)
 	}
 
 	// Still running — use exponential backoff based on elapsed time
@@ -460,6 +455,7 @@ func (r *StatefulMigrationReconciler) handleRestoring(ctx context.Context, m *mi
 	}
 
 	// Target pod is Running, record the result and move on
+	base := m.DeepCopy()
 	m.Status.TargetPod = targetPodName
 
 	var duration time.Duration
@@ -472,7 +468,7 @@ func (r *StatefulMigrationReconciler) handleRestoring(ctx context.Context, m *mi
 	r.recordPhaseTiming(m, "Restoring", duration)
 
 	logger.Info("Target pod is Running", "pod", targetPodName)
-	return r.transitionPhase(ctx, m, migrationv1alpha1.PhaseReplaying)
+	return r.transitionPhase(ctx, m, base, migrationv1alpha1.PhaseReplaying)
 }
 
 // handleReplaying sends the START_REPLAY control message and monitors the
@@ -508,6 +504,7 @@ func (r *StatefulMigrationReconciler) handleReplaying(ctx context.Context, m *mi
 
 	if depth == 0 {
 		// Queue is fully drained, proceed to finalization
+		base := m.DeepCopy()
 		var duration time.Duration
 		if startStr, ok := m.Status.PhaseTimings["Replaying.start"]; ok {
 			if startTime, parseErr := time.Parse(time.RFC3339, startStr); parseErr == nil {
@@ -516,7 +513,7 @@ func (r *StatefulMigrationReconciler) handleReplaying(ctx context.Context, m *mi
 			delete(m.Status.PhaseTimings, "Replaying.start")
 		}
 		r.recordPhaseTiming(m, "Replaying", duration)
-		return r.transitionPhase(ctx, m, migrationv1alpha1.PhaseFinalizing)
+		return r.transitionPhase(ctx, m, base, migrationv1alpha1.PhaseFinalizing)
 	}
 
 	// Check if we've exceeded the replay cutoff timeout
@@ -528,9 +525,10 @@ func (r *StatefulMigrationReconciler) handleReplaying(ctx context.Context, m *mi
 				if elapsed > cutoff {
 					logger.Info("Replay cutoff reached, proceeding to finalization",
 						"elapsed", elapsed, "cutoff", cutoff, "remainingDepth", depth)
+					base := m.DeepCopy()
 					delete(m.Status.PhaseTimings, "Replaying.start")
 					r.recordPhaseTiming(m, "Replaying", elapsed)
-					return r.transitionPhase(ctx, m, migrationv1alpha1.PhaseFinalizing)
+					return r.transitionPhase(ctx, m, base, migrationv1alpha1.PhaseFinalizing)
 				}
 			}
 		}
@@ -545,6 +543,7 @@ func (r *StatefulMigrationReconciler) handleReplaying(ctx context.Context, m *mi
 // is marked as Completed.
 func (r *StatefulMigrationReconciler) handleFinalizing(ctx context.Context, m *migrationv1alpha1.StatefulMigration) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	base := m.DeepCopy()
 	phaseStart := time.Now()
 
 	// Send END_REPLAY to signal the target pod to switch to the primary queue
@@ -579,7 +578,7 @@ func (r *StatefulMigrationReconciler) handleFinalizing(ctx context.Context, m *m
 	r.recordPhaseTiming(m, "Finalizing", time.Since(phaseStart))
 	logger.Info("Migration finalized successfully")
 
-	return r.transitionPhase(ctx, m, migrationv1alpha1.PhaseCompleted)
+	return r.transitionPhase(ctx, m, base, migrationv1alpha1.PhaseCompleted)
 }
 
 // ---------------------------------------------------------------------------
@@ -599,11 +598,12 @@ func (r *StatefulMigrationReconciler) recordPhaseTiming(m *migrationv1alpha1.Sta
 	m.Status.PhaseTimings[phaseName] = duration.Round(time.Millisecond).String()
 }
 
-// transitionPhase updates the migration status to the new phase and requeues.
-func (r *StatefulMigrationReconciler) transitionPhase(ctx context.Context, m *migrationv1alpha1.StatefulMigration, newPhase migrationv1alpha1.Phase) (ctrl.Result, error) {
-	patch := client.MergeFrom(m.DeepCopy())
+// transitionPhase updates the migration status to the new phase using a merge
+// patch and requeues. The base must be a DeepCopy taken BEFORE any in-memory
+// status modifications so the patch diff includes all handler changes.
+func (r *StatefulMigrationReconciler) transitionPhase(ctx context.Context, m *migrationv1alpha1.StatefulMigration, base client.Object, newPhase migrationv1alpha1.Phase) (ctrl.Result, error) {
 	m.Status.Phase = newPhase
-	if err := r.Status().Patch(ctx, m, patch); err != nil {
+	if err := r.Status().Patch(ctx, m, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{Requeue: true}, nil

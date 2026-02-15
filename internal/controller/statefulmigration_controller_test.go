@@ -164,8 +164,9 @@ func TestReconcile_Pending_SetsSourceNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !result.Requeue {
-		t.Error("expected Requeue after Pending -> Checkpointing transition")
+	// Phase chaining: Pending -> Checkpointing -> Transferring (creates job, returns RequeueAfter)
+	if result.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter after phase chaining through to Transferring")
 	}
 
 	got := fetchMigration(r, ctx, "mig-pending", "default")
@@ -175,8 +176,10 @@ func TestReconcile_Pending_SetsSourceNode(t *testing.T) {
 	if got.Status.StartTime == nil {
 		t.Error("expected startTime to be set")
 	}
-	if got.Status.Phase != migrationv1alpha1.PhaseCheckpointing {
-		t.Errorf("expected phase %q, got %q", migrationv1alpha1.PhaseCheckpointing, got.Status.Phase)
+	// With phase chaining, Pending and Checkpointing complete synchronously
+	// and the reconcile stops at Transferring (waiting for job)
+	if got.Status.Phase != migrationv1alpha1.PhaseTransferring {
+		t.Errorf("expected phase %q, got %q", migrationv1alpha1.PhaseTransferring, got.Status.Phase)
 	}
 }
 
@@ -294,7 +297,7 @@ func TestRecordPhaseTiming(t *testing.T) {
 }
 
 func TestReconcile_Replaying_QueueDrained(t *testing.T) {
-	// When queue depth is 0, replaying should transition to finalizing.
+	// When queue depth is 0, replaying should chain through to Completed.
 	migration := newMigration("mig-replay", migrationv1alpha1.PhaseReplaying)
 	migration.Status.TargetPod = "myapp-0-shadow"
 	migration.Status.SourceNode = "node-1"
@@ -310,19 +313,27 @@ func TestReconcile_Replaying_QueueDrained(t *testing.T) {
 	}
 
 	got := fetchMigration(r, ctx, "mig-replay", "default")
-	if got.Status.Phase != migrationv1alpha1.PhaseFinalizing {
-		t.Errorf("expected phase %q, got %q", migrationv1alpha1.PhaseFinalizing, got.Status.Phase)
+	// Phase chaining: Replaying (drained) -> Finalizing -> Completed
+	if got.Status.Phase != migrationv1alpha1.PhaseCompleted {
+		t.Errorf("expected phase %q, got %q", migrationv1alpha1.PhaseCompleted, got.Status.Phase)
 	}
 
-	// Should have sent START_REPLAY
-	found := false
+	// Should have sent START_REPLAY and END_REPLAY
+	foundStart := false
+	foundEnd := false
 	for _, msg := range mockBroker.ControlMessages {
 		if msg.Type == messaging.ControlStartReplay {
-			found = true
+			foundStart = true
+		}
+		if msg.Type == messaging.ControlEndReplay {
+			foundEnd = true
 		}
 	}
-	if !found {
+	if !foundStart {
 		t.Error("expected START_REPLAY control message to have been sent")
+	}
+	if !foundEnd {
+		t.Error("expected END_REPLAY control message to have been sent")
 	}
 
 	_ = result
@@ -475,6 +486,7 @@ func TestReconcile_Transferring_JobComplete(t *testing.T) {
 	migration := newMigration("mig-xfer2", migrationv1alpha1.PhaseTransferring)
 	migration.Status.SourceNode = "node-1"
 	migration.Status.CheckpointID = "/var/lib/kubelet/checkpoints/checkpoint-myapp-0.tar"
+	migration.Status.ContainerName = "app"
 	migration.Status.PhaseTimings = map[string]string{}
 
 	// Create the job in a complete state
@@ -488,7 +500,21 @@ func TestReconcile_Transferring_JobComplete(t *testing.T) {
 		},
 	}
 
-	r, _, ctx := setupTest(migration, job)
+	// Source pod needed for phase chaining into Restoring (ShadowPod strategy)
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	r, _, ctx := setupTest(migration, job, sourcePod)
 
 	result, err := reconcileOnce(r, ctx, "mig-xfer2", "default")
 	if err != nil {
@@ -496,11 +522,12 @@ func TestReconcile_Transferring_JobComplete(t *testing.T) {
 	}
 
 	got := fetchMigration(r, ctx, "mig-xfer2", "default")
+	// Phase chaining: Transferring (job complete) -> Restoring (creates pod, returns RequeueAfter)
 	if got.Status.Phase != migrationv1alpha1.PhaseRestoring {
 		t.Errorf("expected phase %q, got %q", migrationv1alpha1.PhaseRestoring, got.Status.Phase)
 	}
-	if !result.Requeue {
-		t.Error("expected Requeue after transitioning to Restoring")
+	if result.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter while waiting for target pod to start")
 	}
 }
 
@@ -614,7 +641,8 @@ func TestReconcile_Restoring_ShadowPod_PodRunning(t *testing.T) {
 		},
 	}
 
-	r, _, ctx := setupTest(migration, sourcePod, shadowPod)
+	r, mockBroker, ctx := setupTest(migration, sourcePod, shadowPod)
+	mockBroker.Connected = true
 
 	result, err := reconcileOnce(r, ctx, "mig-restore2", "default")
 	if err != nil {
@@ -622,14 +650,15 @@ func TestReconcile_Restoring_ShadowPod_PodRunning(t *testing.T) {
 	}
 
 	got := fetchMigration(r, ctx, "mig-restore2", "default")
-	if got.Status.Phase != migrationv1alpha1.PhaseReplaying {
-		t.Errorf("expected phase %q, got %q", migrationv1alpha1.PhaseReplaying, got.Status.Phase)
+	// Phase chaining: Restoring (pod running) -> Replaying (queue drained) -> Finalizing -> Completed
+	if got.Status.Phase != migrationv1alpha1.PhaseCompleted {
+		t.Errorf("expected phase %q, got %q", migrationv1alpha1.PhaseCompleted, got.Status.Phase)
 	}
 	if got.Status.TargetPod != "myapp-0-shadow" {
 		t.Errorf("expected targetPod %q, got %q", "myapp-0-shadow", got.Status.TargetPod)
 	}
-	if !result.Requeue {
-		t.Error("expected Requeue after transition to Replaying")
+	if result.Requeue || result.RequeueAfter > 0 {
+		t.Error("expected no requeue after completing full migration chain")
 	}
 }
 
