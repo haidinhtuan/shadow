@@ -148,9 +148,30 @@ spec:
                 description: PhaseTimings records the duration of each completed
                   phase
                 type: object
+              sourceContainers:
+                description: SourceContainers stores the source pod container specs
+                  for use during restore
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                type: array
               sourceNode:
                 description: SourceNode is the node where the source pod is running
                 type: string
+              sourcePodLabels:
+                additionalProperties:
+                  type: string
+                description: SourcePodLabels stores the source pod labels for copying
+                  to the target pod
+                type: object
+              statefulSetName:
+                description: StatefulSetName is the name of the owning StatefulSet
+                type: string
+              originalReplicas:
+                description: OriginalReplicas is the StatefulSet replica count before
+                  scale-down
+                format: int32
+                type: integer
               startTime:
                 description: StartTime records when the migration was initiated
                 format: date-time

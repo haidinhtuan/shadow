@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -168,6 +169,18 @@ func (r *StatefulMigrationReconciler) handlePending(ctx context.Context, m *migr
 	m.Status.StartTime = &now
 	if m.Status.PhaseTimings == nil {
 		m.Status.PhaseTimings = make(map[string]string)
+	}
+
+	// Capture source pod labels and containers for use during restore phase
+	m.Status.SourcePodLabels = sourcePod.Labels
+	m.Status.SourceContainers = sourcePod.Spec.Containers
+
+	// Record the owning StatefulSet name (for scale-down/up during Sequential migration)
+	for _, ref := range sourcePod.OwnerReferences {
+		if ref.Kind == "StatefulSet" {
+			m.Status.StatefulSetName = ref.Name
+			break
+		}
 	}
 
 	logger.Info("Pending phase complete",
@@ -343,7 +356,7 @@ func (r *StatefulMigrationReconciler) handleTransferring(ctx context.Context, m 
 // handleRestoring creates the target pod on the destination node using the
 // checkpoint image. Depending on the migration strategy:
 //   - ShadowPod: creates a new pod alongside the source
-//   - Sequential: deletes the source first, then creates the target with the same name
+//   - Sequential: scales down the StatefulSet, deletes the source, then creates the target
 func (r *StatefulMigrationReconciler) handleRestoring(ctx context.Context, m *migrationv1alpha1.StatefulMigration) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	ensurePhaseTimings(m)
@@ -367,108 +380,158 @@ func (r *StatefulMigrationReconciler) handleRestoring(ctx context.Context, m *mi
 	targetPod := &corev1.Pod{}
 	err := r.Get(ctx, types.NamespacedName{Name: targetPodName, Namespace: m.Namespace}, targetPod)
 
-	if errors.IsNotFound(err) {
-		// For Sequential strategy, delete the source pod first
-		if m.Spec.MigrationStrategy == "Sequential" {
-			sourcePod := &corev1.Pod{}
-			srcErr := r.Get(ctx, types.NamespacedName{Name: m.Spec.SourcePod, Namespace: m.Namespace}, sourcePod)
-			if srcErr == nil {
-				// Source still exists, delete it and wait
-				logger.Info("Deleting source pod for Sequential migration", "pod", m.Spec.SourcePod)
-				if err := r.Delete(ctx, sourcePod); err != nil {
-					return r.failMigration(ctx, m, fmt.Sprintf("delete source pod: %v", err))
+	if err == nil {
+		// For Sequential strategy, the target pod name equals the source pod name.
+		// A pod without migration labels could be:
+		//   - The original source pod (not yet deleted) — scale down + delete
+		//   - A pod recreated by the StatefulSet controller — just delete
+		if m.Spec.MigrationStrategy == "Sequential" && targetPod.Labels["migration.ms2m.io/migration"] != m.Name {
+			if m.Status.OriginalReplicas == 0 {
+				// Source pod still exists — scale down StatefulSet first
+				if m.Status.StatefulSetName != "" {
+					sts := &appsv1.StatefulSet{}
+					stsErr := r.Get(ctx, types.NamespacedName{Name: m.Status.StatefulSetName, Namespace: m.Namespace}, sts)
+					if stsErr == nil && sts.Spec.Replicas != nil && *sts.Spec.Replicas > 0 {
+						patch := client.MergeFrom(m.DeepCopy())
+						m.Status.OriginalReplicas = *sts.Spec.Replicas
+						_ = r.Status().Patch(ctx, m, patch)
+
+						newReplicas := *sts.Spec.Replicas - 1
+						stsPatch := client.MergeFrom(sts.DeepCopy())
+						sts.Spec.Replicas = &newReplicas
+						if err := r.Patch(ctx, sts, stsPatch); err != nil {
+							return r.failMigration(ctx, m, fmt.Sprintf("scale down StatefulSet %q: %v", m.Status.StatefulSetName, err))
+						}
+						logger.Info("Scaled down StatefulSet", "statefulset", m.Status.StatefulSetName, "replicas", newReplicas)
+					} else if stsErr != nil && !errors.IsNotFound(stsErr) {
+						return ctrl.Result{}, stsErr
+					}
 				}
-				return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
-			} else if !errors.IsNotFound(srcErr) {
-				return ctrl.Result{}, srcErr
+				logger.Info("Deleting source pod for Sequential migration", "pod", targetPodName)
+			} else {
+				logger.Info("Deleting pod recreated by StatefulSet controller", "pod", targetPodName)
 			}
-			// Source pod is gone, proceed with creating the target
+			if delErr := r.Delete(ctx, targetPod); delErr != nil && !errors.IsNotFound(delErr) {
+				return ctrl.Result{}, delErr
+			}
+			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 		}
 
-		// Look up the source pod to copy container spec (for ShadowPod, source still exists)
+		// Target pod exists with correct identity, wait for it to be Running
+		if targetPod.Status.Phase != corev1.PodRunning {
+			logger.Info("Waiting for target pod to become Running", "pod", targetPodName, "phase", targetPod.Status.Phase)
+			return ctrl.Result{RequeueAfter: r.pollingBackoff(m, "Restoring.start")}, nil
+		}
+
+		// Target pod is Running, record the result and move on
+		base := m.DeepCopy()
+		m.Status.TargetPod = targetPodName
+
+		var duration time.Duration
+		if startStr, ok := m.Status.PhaseTimings["Restoring.start"]; ok {
+			if startTime, parseErr := time.Parse(time.RFC3339, startStr); parseErr == nil {
+				duration = time.Since(startTime)
+			}
+			delete(m.Status.PhaseTimings, "Restoring.start")
+		}
+		r.recordPhaseTiming(m, "Restoring", duration)
+
+		logger.Info("Target pod is Running", "pod", targetPodName)
+		return r.transitionPhase(ctx, m, base, migrationv1alpha1.PhaseReplaying)
+	}
+
+	if !errors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+
+	// Gather source pod information for building the target pod.
+	// For Sequential, the source was deleted — use data captured during Pending.
+	// For ShadowPod, the source is still alive — look it up directly.
+	checkpointImage := fmt.Sprintf("%s/%s:checkpoint", m.Spec.CheckpointImageRepository, m.Spec.SourcePod)
+	var sourceContainers []corev1.Container
+	var sourceLabels map[string]string
+	var sourcePodSpec *corev1.PodSpec
+
+	if m.Spec.MigrationStrategy != "Sequential" {
+		// ShadowPod: source pod is still alive
 		sourcePod := &corev1.Pod{}
-		if m.Spec.MigrationStrategy != "Sequential" {
-			if err := r.Get(ctx, types.NamespacedName{Name: m.Spec.SourcePod, Namespace: m.Namespace}, sourcePod); err != nil {
-				return r.failMigration(ctx, m, fmt.Sprintf("source pod lookup for restore: %v", err))
-			}
+		if err := r.Get(ctx, types.NamespacedName{Name: m.Spec.SourcePod, Namespace: m.Namespace}, sourcePod); err != nil {
+			return r.failMigration(ctx, m, fmt.Sprintf("source pod lookup for restore: %v", err))
 		}
+		sourceContainers = sourcePod.Spec.Containers
+		sourceLabels = sourcePod.Labels
+		sourcePodSpec = &sourcePod.Spec
+	} else if len(m.Status.SourceContainers) > 0 {
+		// Sequential: use data captured during Pending phase
+		sourceContainers = m.Status.SourceContainers
+		sourceLabels = m.Status.SourcePodLabels
+	}
 
-		// Build the target pod spec
-		checkpointImage := fmt.Sprintf("%s/%s:checkpoint", m.Spec.CheckpointImageRepository, m.Spec.SourcePod)
-		containers := []corev1.Container{
+	// Build containers: copy source containers with checkpoint image overlay
+	var containers []corev1.Container
+	if len(sourceContainers) > 0 {
+		for _, c := range sourceContainers {
+			if c.Name == m.Status.ContainerName {
+				c.Image = checkpointImage
+			}
+			containers = append(containers, c)
+		}
+	} else {
+		// Minimal fallback: single container with checkpoint image
+		containers = []corev1.Container{
 			{
 				Name:  m.Status.ContainerName,
 				Image: checkpointImage,
 			},
 		}
+	}
 
-		// Build labels - start with migration labels
-		labels := map[string]string{
-			"migration.ms2m.io/migration": m.Name,
-			"migration.ms2m.io/role":      "target",
+	// Build labels — migration labels first, then source pod labels
+	labels := map[string]string{
+		"migration.ms2m.io/migration": m.Name,
+		"migration.ms2m.io/role":      "target",
+	}
+	for k, v := range sourceLabels {
+		if _, exists := labels[k]; !exists {
+			labels[k] = v
 		}
-		// Copy source pod labels (available in ShadowPod strategy)
-		if sourcePod.Name != "" {
-			for k, v := range sourcePod.Labels {
-				if _, exists := labels[k]; !exists {
-					labels[k] = v
-				}
-			}
-		}
+	}
 
-		newPod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      targetPodName,
-				Namespace: m.Namespace,
-				Labels:    labels,
-				Annotations: map[string]string{
-					"migration.ms2m.io/checkpoint-image": checkpointImage,
-				},
-				OwnerReferences: []metav1.OwnerReference{
-					*metav1.NewControllerRef(m, migrationv1alpha1.GroupVersion.WithKind("StatefulMigration")),
-				},
+	newPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      targetPodName,
+			Namespace: m.Namespace,
+			Labels:    labels,
+			Annotations: map[string]string{
+				"migration.ms2m.io/checkpoint-image": checkpointImage,
 			},
-			Spec: corev1.PodSpec{
-				NodeName:   m.Spec.TargetNode,
-				Containers: containers,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(m, migrationv1alpha1.GroupVersion.WithKind("StatefulMigration")),
 			},
-		}
-
-		if err := r.Create(ctx, newPod); err != nil {
-			if errors.IsAlreadyExists(err) {
-				return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
-			}
-			return r.failMigration(ctx, m, fmt.Sprintf("create target pod: %v", err))
-		}
-
-		logger.Info("Created target pod", "pod", targetPodName, "node", m.Spec.TargetNode)
-		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
-
-	} else if err != nil {
-		return ctrl.Result{}, err
+		},
+		Spec: corev1.PodSpec{
+			NodeName:   m.Spec.TargetNode,
+			Containers: containers,
+		},
 	}
 
-	// Target pod exists, wait for it to be Running
-	if targetPod.Status.Phase != corev1.PodRunning {
-		logger.Info("Waiting for target pod to become Running", "pod", targetPodName, "phase", targetPod.Status.Phase)
-		return ctrl.Result{RequeueAfter: r.pollingBackoff(m, "Restoring.start")}, nil
-	}
-
-	// Target pod is Running, record the result and move on
-	base := m.DeepCopy()
-	m.Status.TargetPod = targetPodName
-
-	var duration time.Duration
-	if startStr, ok := m.Status.PhaseTimings["Restoring.start"]; ok {
-		if startTime, err := time.Parse(time.RFC3339, startStr); err == nil {
-			duration = time.Since(startTime)
+	// For ShadowPod strategy, set hostname and subdomain for DNS identity
+	if m.Spec.MigrationStrategy == "ShadowPod" && sourcePodSpec != nil {
+		newPod.Spec.Hostname = m.Spec.SourcePod
+		if sourcePodSpec.Subdomain != "" {
+			newPod.Spec.Subdomain = sourcePodSpec.Subdomain
 		}
-		delete(m.Status.PhaseTimings, "Restoring.start")
 	}
-	r.recordPhaseTiming(m, "Restoring", duration)
 
-	logger.Info("Target pod is Running", "pod", targetPodName)
-	return r.transitionPhase(ctx, m, base, migrationv1alpha1.PhaseReplaying)
+	if err := r.Create(ctx, newPod); err != nil {
+		if errors.IsAlreadyExists(err) {
+			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+		}
+		return r.failMigration(ctx, m, fmt.Sprintf("create target pod: %v", err))
+	}
+
+	logger.Info("Created target pod", "pod", targetPodName, "node", m.Spec.TargetNode)
+	return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 }
 
 // handleReplaying sends the START_REPLAY control message and monitors the
@@ -564,6 +627,24 @@ func (r *StatefulMigrationReconciler) handleFinalizing(ctx context.Context, m *m
 		if err == nil {
 			if delErr := r.Delete(ctx, sourcePod); delErr != nil {
 				logger.Error(delErr, "Failed to delete source pod", "pod", m.Spec.SourcePod)
+			}
+		} else if !errors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// For Sequential strategy, scale the StatefulSet back to its original replica count
+	if m.Spec.MigrationStrategy == "Sequential" && m.Status.StatefulSetName != "" && m.Status.OriginalReplicas > 0 {
+		sts := &appsv1.StatefulSet{}
+		if err := r.Get(ctx, types.NamespacedName{Name: m.Status.StatefulSetName, Namespace: m.Namespace}, sts); err == nil {
+			if sts.Spec.Replicas == nil || *sts.Spec.Replicas < m.Status.OriginalReplicas {
+				stsPatch := client.MergeFrom(sts.DeepCopy())
+				sts.Spec.Replicas = &m.Status.OriginalReplicas
+				if err := r.Patch(ctx, sts, stsPatch); err != nil {
+					logger.Error(err, "Failed to scale up StatefulSet", "statefulset", m.Status.StatefulSetName)
+				} else {
+					logger.Info("Scaled up StatefulSet", "statefulset", m.Status.StatefulSetName, "replicas", m.Status.OriginalReplicas)
+				}
 			}
 		} else if !errors.IsNotFound(err) {
 			return ctrl.Result{}, err

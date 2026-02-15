@@ -1072,6 +1072,337 @@ func TestReconcile_Restoring_UsesContainerName(t *testing.T) {
 	}
 }
 
+func TestReconcile_Restoring_Sequential_ScalesDownStatefulSet(t *testing.T) {
+	// When restoring with Sequential strategy, the controller should scale down
+	// the owning StatefulSet before deleting the source pod.
+	stsReplicas := int32(1)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp",
+			Namespace: "default",
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &stsReplicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "myapp"},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "myapp"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "myapp:latest"}}},
+			},
+		},
+	}
+
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "myapp"},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{
+					Name:  "app",
+					Image: "myapp:latest",
+					Ports: []corev1.ContainerPort{{ContainerPort: 8080}},
+					Env:   []corev1.EnvVar{{Name: "APP_ENV", Value: "production"}},
+				},
+			},
+		},
+	}
+
+	migration := newMigration("mig-seq-restore", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "Sequential"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.StatefulSetName = "myapp"
+	migration.Status.PhaseTimings = map[string]string{}
+	migration.Status.SourcePodLabels = map[string]string{"app": "myapp"}
+	migration.Status.SourceContainers = []corev1.Container{
+		{
+			Name:  "app",
+			Image: "myapp:latest",
+			Ports: []corev1.ContainerPort{{ContainerPort: 8080}},
+			Env:   []corev1.EnvVar{{Name: "APP_ENV", Value: "production"}},
+		},
+	}
+
+	r, _, ctx := setupTest(migration, sourcePod, sts)
+
+	// First reconcile: should scale down StatefulSet and delete source pod
+	result, err := reconcileOnce(r, ctx, "mig-seq-restore", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter after deleting source pod")
+	}
+
+	// Verify StatefulSet was scaled down
+	updatedSts := &appsv1.StatefulSet{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "myapp", Namespace: "default"}, updatedSts); err != nil {
+		t.Fatalf("failed to get StatefulSet: %v", err)
+	}
+	if *updatedSts.Spec.Replicas != 0 {
+		t.Errorf("expected StatefulSet replicas 0, got %d", *updatedSts.Spec.Replicas)
+	}
+
+	// Verify original replicas stored in status
+	got := fetchMigration(r, ctx, "mig-seq-restore", "default")
+	if got.Status.OriginalReplicas != 1 {
+		t.Errorf("expected OriginalReplicas 1, got %d", got.Status.OriginalReplicas)
+	}
+
+	// Second reconcile: source pod deleted, should create target pod
+	result, err = reconcileOnce(r, ctx, "mig-seq-restore", "default")
+	if err != nil {
+		t.Fatalf("unexpected error on second reconcile: %v", err)
+	}
+
+	// Verify target pod was created with full container spec
+	targetPod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "myapp-0", Namespace: "default"}, targetPod); err != nil {
+		t.Fatalf("expected target pod to be created: %v", err)
+	}
+	if targetPod.Spec.NodeName != "node-2" {
+		t.Errorf("expected target on node-2, got %q", targetPod.Spec.NodeName)
+	}
+	// Verify container ports and env were copied
+	if len(targetPod.Spec.Containers) == 0 {
+		t.Fatal("expected at least one container")
+	}
+	c := targetPod.Spec.Containers[0]
+	if len(c.Ports) == 0 || c.Ports[0].ContainerPort != 8080 {
+		t.Errorf("expected container port 8080, got %v", c.Ports)
+	}
+	if len(c.Env) == 0 || c.Env[0].Value != "production" {
+		t.Errorf("expected env APP_ENV=production, got %v", c.Env)
+	}
+	// Verify source labels were copied
+	if targetPod.Labels["app"] != "myapp" {
+		t.Errorf("expected label app=myapp, got %q", targetPod.Labels["app"])
+	}
+	// Verify migration labels
+	if targetPod.Labels["migration.ms2m.io/migration"] != "mig-seq-restore" {
+		t.Errorf("expected migration label, got %q", targetPod.Labels["migration.ms2m.io/migration"])
+	}
+}
+
+func TestReconcile_Restoring_Sequential_DeletesRecreatedPod(t *testing.T) {
+	// If the StatefulSet controller recreated a pod (without migration labels),
+	// handleRestoring should delete it and requeue.
+	recreatedPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "myapp"}, // no migration labels
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	migration := newMigration("mig-identity", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "Sequential"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{}
+	migration.Status.SourceContainers = []corev1.Container{
+		{Name: "app", Image: "myapp:latest"},
+	}
+
+	r, _, ctx := setupTest(migration, recreatedPod)
+
+	result, err := reconcileOnce(r, ctx, "mig-identity", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter after deleting recreated pod")
+	}
+
+	// Verify the recreated pod was deleted
+	pod := &corev1.Pod{}
+	podErr := r.Get(ctx, types.NamespacedName{Name: "myapp-0", Namespace: "default"}, pod)
+	if podErr == nil {
+		t.Error("expected recreated pod to be deleted")
+	}
+}
+
+func TestReconcile_Finalizing_Sequential_ScalesUpStatefulSet(t *testing.T) {
+	// After Sequential migration completes, handleFinalizing should scale
+	// the StatefulSet back to its original replica count.
+	stsReplicas := int32(0)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp",
+			Namespace: "default",
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &stsReplicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "myapp"},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "myapp"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "myapp:latest"}}},
+			},
+		},
+	}
+
+	migration := newMigration("mig-final-scaleup", migrationv1alpha1.PhaseFinalizing)
+	migration.Spec.MigrationStrategy = "Sequential"
+	migration.Status.TargetPod = "myapp-0"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.StatefulSetName = "myapp"
+	migration.Status.OriginalReplicas = 1
+	migration.Status.PhaseTimings = map[string]string{}
+
+	r, mockBroker, ctx := setupTest(migration, sts)
+	mockBroker.Connected = true
+
+	_, err := reconcileOnce(r, ctx, "mig-final-scaleup", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-final-scaleup", "default")
+	if got.Status.Phase != migrationv1alpha1.PhaseCompleted {
+		t.Errorf("expected phase %q, got %q", migrationv1alpha1.PhaseCompleted, got.Status.Phase)
+	}
+
+	// Verify StatefulSet was scaled back up
+	updatedSts := &appsv1.StatefulSet{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "myapp", Namespace: "default"}, updatedSts); err != nil {
+		t.Fatalf("failed to get StatefulSet: %v", err)
+	}
+	if *updatedSts.Spec.Replicas != 1 {
+		t.Errorf("expected StatefulSet replicas 1, got %d", *updatedSts.Spec.Replicas)
+	}
+}
+
+func TestReconcile_Pending_CapturesSourcePodInfo(t *testing.T) {
+	// handlePending should capture source pod labels, containers,
+	// and the StatefulSet name into the migration status.
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "myapp", "version": "v2"},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "apps/v1",
+					Kind:       "StatefulSet",
+					Name:       "myapp",
+					UID:        "sts-uid-123",
+				},
+			},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{
+					Name:  "app",
+					Image: "myapp:latest",
+					Ports: []corev1.ContainerPort{{ContainerPort: 8080}},
+				},
+			},
+		},
+	}
+
+	migration := newMigration("mig-capture", migrationv1alpha1.PhasePending)
+	migration.Spec.MigrationStrategy = ""
+
+	r, _, ctx := setupTest(migration, sourcePod)
+
+	_, err := reconcileOnce(r, ctx, "mig-capture", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-capture", "default")
+
+	// Verify source pod labels were captured
+	if got.Status.SourcePodLabels["app"] != "myapp" {
+		t.Errorf("expected SourcePodLabels[app] = myapp, got %q", got.Status.SourcePodLabels["app"])
+	}
+	if got.Status.SourcePodLabels["version"] != "v2" {
+		t.Errorf("expected SourcePodLabels[version] = v2, got %q", got.Status.SourcePodLabels["version"])
+	}
+
+	// Verify source containers were captured
+	if len(got.Status.SourceContainers) != 1 {
+		t.Fatalf("expected 1 source container, got %d", len(got.Status.SourceContainers))
+	}
+	if got.Status.SourceContainers[0].Name != "app" {
+		t.Errorf("expected container name %q, got %q", "app", got.Status.SourceContainers[0].Name)
+	}
+
+	// Verify StatefulSet name was captured
+	if got.Status.StatefulSetName != "myapp" {
+		t.Errorf("expected StatefulSetName %q, got %q", "myapp", got.Status.StatefulSetName)
+	}
+}
+
+func TestReconcile_Restoring_ShadowPod_CopiesFullContainerSpec(t *testing.T) {
+	// Verify that the target pod gets the full container spec (ports, env,
+	// resource limits) from the source pod, not just the container name.
+	migration := newMigration("mig-full-spec", migrationv1alpha1.PhaseRestoring)
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.ContainerName = "app"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{
+					Name:  "app",
+					Image: "myapp:latest",
+					Ports: []corev1.ContainerPort{{ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
+					Env:   []corev1.EnvVar{{Name: "DB_HOST", Value: "db.local"}},
+				},
+			},
+		},
+	}
+
+	r, _, ctx := setupTest(migration, sourcePod)
+
+	_, err := reconcileOnce(r, ctx, "mig-full-spec", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	targetPod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "myapp-0-shadow", Namespace: "default"}, targetPod); err != nil {
+		t.Fatalf("expected shadow pod to be created: %v", err)
+	}
+
+	c := targetPod.Spec.Containers[0]
+	// Image should be the checkpoint image
+	expectedImage := fmt.Sprintf("%s/%s:checkpoint", migration.Spec.CheckpointImageRepository, migration.Spec.SourcePod)
+	if c.Image != expectedImage {
+		t.Errorf("expected checkpoint image %q, got %q", expectedImage, c.Image)
+	}
+	// Ports should be copied
+	if len(c.Ports) != 1 || c.Ports[0].ContainerPort != 8080 {
+		t.Errorf("expected port 8080, got %v", c.Ports)
+	}
+	// Env should be copied
+	if len(c.Env) != 1 || c.Env[0].Name != "DB_HOST" {
+		t.Errorf("expected env DB_HOST, got %v", c.Env)
+	}
+}
+
 func TestIntegration_MigrationNotFound_NoError(t *testing.T) {
 	if cfg == nil {
 		t.Skip("envtest not available, skipping integration test")

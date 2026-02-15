@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -83,6 +84,18 @@ type StatefulMigrationStatus struct {
 
 	// PhaseTimings records the duration of each completed phase
 	PhaseTimings map[string]string `json:"phaseTimings,omitempty"`
+
+	// StatefulSetName is the name of the owning StatefulSet (for Sequential strategy scale-down/up)
+	StatefulSetName string `json:"statefulSetName,omitempty"`
+
+	// OriginalReplicas is the StatefulSet's replica count before scale-down
+	OriginalReplicas int32 `json:"originalReplicas,omitempty"`
+
+	// SourcePodLabels stores the source pod's labels, captured during Pending phase
+	SourcePodLabels map[string]string `json:"sourcePodLabels,omitempty"`
+
+	// SourceContainers stores the source pod's container specs for use during restore
+	SourceContainers []corev1.Container `json:"sourceContainers,omitempty"`
 }
 
 // +kubebuilder:object:root=true
