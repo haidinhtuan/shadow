@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -104,22 +105,11 @@ func (r *RabbitMQClient) CreateSecondaryQueue(_ context.Context, primaryQueue, e
 // DeleteSecondaryQueue tears down the fan-out setup: unbinds the primary
 // queue, deletes the secondary queue, and removes the exchange.
 func (r *RabbitMQClient) DeleteSecondaryQueue(_ context.Context, secondaryQueue, primaryQueue string) error {
-	// Derive the exchange name from the secondary queue for unbinding.
-	// The exchange was created with a caller-supplied name, but we only
-	// need the primary queue unbind to stop fan-out duplication.
-	// We unbind the primary queue from all fanout exchanges it might
-	// be attached to — in practice the caller passes the same exchange.
-
-	// Unbind primary queue from the exchange. We use an empty exchange
-	// name for the routing key since this is a fanout exchange.
-	// Note: the exchange name is embedded in the binding, so we need
-	// to derive it. Convention: exchange = secondaryQueue minus ".ms2m-replay" + ".fanout"
-	// However, the interface doesn't pass the exchange name, so we
-	// construct it from the secondary queue name.
-	baseName := secondaryQueue
-	if len(baseName) > len(".ms2m-replay") {
-		baseName = baseName[:len(baseName)-len(".ms2m-replay")]
-	}
+	// Derive the exchange name from the secondary queue name.
+	// Convention: secondary queue = primaryQueue + ".ms2m-replay",
+	// and the exchange was named by the caller during CreateSecondaryQueue.
+	// We reconstruct the base name by stripping the known suffix.
+	baseName := strings.TrimSuffix(secondaryQueue, ".ms2m-replay")
 	exchangeName := baseName + ".fanout"
 
 	if err := r.ch.QueueUnbind(primaryQueue, "", exchangeName, nil); err != nil {

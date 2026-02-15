@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
@@ -43,7 +44,7 @@ func main() {
 	}
 
 	fmt.Printf("Pushing image to %s\n", imageRef)
-	if err := crane.Push(img, imageRef); err != nil {
+	if err := crane.Push(img, imageRef, crane.WithAuthFromKeychain(authn.DefaultKeychain)); err != nil {
 		fmt.Fprintf(os.Stderr, "error pushing image: %v\n", err)
 		os.Exit(1)
 	}

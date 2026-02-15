@@ -18,10 +18,10 @@ func TestBuildCheckpointImage_ValidTar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
 	}
-	defer tmpFile.Close()
 
 	buf := make([]byte, 1024)
 	if _, err := tmpFile.Write(buf); err != nil {
+		tmpFile.Close()
 		t.Fatalf("failed to write tar data: %v", err)
 	}
 	tmpFile.Close()

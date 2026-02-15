@@ -41,46 +41,29 @@ func TestCheckpointResponse_ParseEmpty(t *testing.T) {
 	}
 }
 
-func TestBuildCheckpointPath(t *testing.T) {
+func TestCheckpoint_EmptyParams(t *testing.T) {
+	// Client with nil restClient — we only need to test the parameter validation
+	// that runs before any REST call.
+	c := &Client{}
+
 	tests := []struct {
-		name          string
-		nodeName      string
-		namespace     string
-		podName       string
-		containerName string
-		want          string
+		name      string
+		node      string
+		ns        string
+		pod       string
+		container string
 	}{
-		{
-			name:          "standard path",
-			nodeName:      "worker-1",
-			namespace:     "default",
-			podName:       "myapp-pod",
-			containerName: "myapp",
-			want:          "/api/v1/nodes/worker-1/proxy/checkpoint/default/myapp-pod/myapp",
-		},
-		{
-			name:          "custom namespace",
-			nodeName:      "node-pool-abc",
-			namespace:     "production",
-			podName:       "api-server-0",
-			containerName: "server",
-			want:          "/api/v1/nodes/node-pool-abc/proxy/checkpoint/production/api-server-0/server",
-		},
-		{
-			name:          "names with hyphens and numbers",
-			nodeName:      "gke-cluster-1-pool-0-abc123",
-			namespace:     "kube-system",
-			podName:       "redis-master-0",
-			containerName: "redis-6379",
-			want:          "/api/v1/nodes/gke-cluster-1-pool-0-abc123/proxy/checkpoint/kube-system/redis-master-0/redis-6379",
-		},
+		{"empty node", "", "default", "app-0", "app"},
+		{"empty namespace", "node-1", "", "app-0", "app"},
+		{"empty pod", "node-1", "default", "", "app"},
+		{"empty container", "node-1", "default", "app-0", ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildCheckpointPath(tt.nodeName, tt.namespace, tt.podName, tt.containerName)
-			if got != tt.want {
-				t.Errorf("buildCheckpointPath() = %q, want %q", got, tt.want)
+			_, err := c.Checkpoint(t.Context(), tt.node, tt.ns, tt.pod, tt.container)
+			if err == nil {
+				t.Error("expected error for empty parameter")
 			}
 		})
 	}
