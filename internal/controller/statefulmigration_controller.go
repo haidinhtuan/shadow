@@ -470,9 +470,10 @@ func (r *StatefulMigrationReconciler) handleRestoring(ctx context.Context, m *mi
 	if len(sourceContainers) > 0 {
 		for _, c := range sourceContainers {
 			restored := corev1.Container{
-				Name:  c.Name,
-				Image: checkpointImage,
-				Ports: c.Ports,
+				Name:            c.Name,
+				Image:           checkpointImage,
+				ImagePullPolicy: corev1.PullAlways,
+				Ports:           c.Ports,
 			}
 			if c.Name != m.Status.ContainerName {
 				// Non-checkpoint containers keep their original image
@@ -483,8 +484,9 @@ func (r *StatefulMigrationReconciler) handleRestoring(ctx context.Context, m *mi
 	} else {
 		containers = []corev1.Container{
 			{
-				Name:  m.Status.ContainerName,
-				Image: checkpointImage,
+				Name:            m.Status.ContainerName,
+				Image:           checkpointImage,
+				ImagePullPolicy: corev1.PullAlways,
 			},
 		}
 	}
