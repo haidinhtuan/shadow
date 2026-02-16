@@ -175,10 +175,23 @@ func (r *StatefulMigrationReconciler) handlePending(ctx context.Context, m *migr
 	m.Status.SourcePodLabels = sourcePod.Labels
 	m.Status.SourceContainers = sourcePod.Spec.Containers
 
-	// Record the owning StatefulSet name (for scale-down/up during Sequential migration)
+	// Record the owning StatefulSet or Deployment name from ownerReferences
 	for _, ref := range sourcePod.OwnerReferences {
 		if ref.Kind == "StatefulSet" {
 			m.Status.StatefulSetName = ref.Name
+			break
+		}
+		if ref.Kind == "ReplicaSet" {
+			// Look up the ReplicaSet to find its parent Deployment
+			rs := &appsv1.ReplicaSet{}
+			if err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: m.Namespace}, rs); err == nil {
+				for _, rsRef := range rs.OwnerReferences {
+					if rsRef.Kind == "Deployment" {
+						m.Status.DeploymentName = rsRef.Name
+						break
+					}
+				}
+			}
 			break
 		}
 	}
@@ -632,6 +645,40 @@ func (r *StatefulMigrationReconciler) handleFinalizing(ctx context.Context, m *m
 		if err == nil {
 			if delErr := r.Delete(ctx, sourcePod); delErr != nil {
 				logger.Error(delErr, "Failed to delete source pod", "pod", m.Spec.SourcePod)
+			}
+		} else if !errors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// For Deployment-owned pods, patch the Deployment's pod template with
+	// nodeAffinity so the replacement pod lands on the target node.
+	if m.Status.DeploymentName != "" {
+		deploy := &appsv1.Deployment{}
+		if err := r.Get(ctx, types.NamespacedName{Name: m.Status.DeploymentName, Namespace: m.Namespace}, deploy); err == nil {
+			deployPatch := client.MergeFrom(deploy.DeepCopy())
+			if deploy.Spec.Template.Spec.Affinity == nil {
+				deploy.Spec.Template.Spec.Affinity = &corev1.Affinity{}
+			}
+			deploy.Spec.Template.Spec.Affinity.NodeAffinity = &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{
+						{
+							MatchExpressions: []corev1.NodeSelectorRequirement{
+								{
+									Key:      "kubernetes.io/hostname",
+									Operator: corev1.NodeSelectorOpIn,
+									Values:   []string{m.Spec.TargetNode},
+								},
+							},
+						},
+					},
+				},
+			}
+			if err := r.Patch(ctx, deploy, deployPatch); err != nil {
+				logger.Error(err, "Failed to patch Deployment nodeAffinity", "deployment", m.Status.DeploymentName)
+			} else {
+				logger.Info("Patched Deployment nodeAffinity", "deployment", m.Status.DeploymentName, "targetNode", m.Spec.TargetNode)
 			}
 		} else if !errors.IsNotFound(err) {
 			return ctrl.Result{}, err

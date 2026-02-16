@@ -2867,3 +2867,64 @@ func TestIntegration_MigrationNotFound_NoError(t *testing.T) {
 		t.Error("should not requeue for missing resource")
 	}
 }
+
+func TestReconcile_Pending_DetectsDeploymentStrategy(t *testing.T) {
+	// Pod owned by a ReplicaSet whose parent is a Deployment should
+	// auto-detect "ShadowPod" strategy and record DeploymentName in status.
+	sourcePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-0",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "apps/v1",
+					Kind:       "ReplicaSet",
+					Name:       "myapp-rs-abc123",
+					UID:        "rs-uid-1",
+				},
+			},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	// The ReplicaSet that owns the pod, itself owned by a Deployment
+	rs := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "myapp-rs-abc123",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "apps/v1",
+					Kind:       "Deployment",
+					Name:       "myapp-deploy",
+					UID:        "deploy-uid-1",
+				},
+			},
+		},
+	}
+
+	migration := newMigration("mig-deploy", migrationv1alpha1.PhasePending)
+	migration.Spec.MigrationStrategy = ""
+
+	r, _, ctx := setupTest(migration, sourcePod, rs)
+
+	_, err := reconcileOnce(r, ctx, "mig-deploy", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-deploy", "default")
+	if got.Spec.MigrationStrategy != "ShadowPod" {
+		t.Errorf("expected strategy %q, got %q", "ShadowPod", got.Spec.MigrationStrategy)
+	}
+	if got.Status.DeploymentName != "myapp-deploy" {
+		t.Errorf("expected DeploymentName %q, got %q", "myapp-deploy", got.Status.DeploymentName)
+	}
+}
+
+// TestReconcile_Finalizing_ShadowPod_PatchesDeployment is in the next commit.
