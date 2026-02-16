@@ -15,8 +15,8 @@ spec:
       hostPID: true
       containers:
       - name: agent
-        image: ms2m-agent:latest
-        imagePullPolicy: IfNotPresent
+        image: registry.registry.svc.cluster.local:5000/ms2m-agent:latest
+        imagePullPolicy: Always
         ports:
         - containerPort: 9443
           name: http
