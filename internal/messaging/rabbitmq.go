@@ -21,6 +21,11 @@ func NewRabbitMQClient() *RabbitMQClient {
 }
 
 func (r *RabbitMQClient) Connect(_ context.Context, brokerURL string) error {
+	// Close any existing connection to avoid leaking resources
+	if r.ch != nil || r.conn != nil {
+		_ = r.Close()
+	}
+
 	conn, err := amqp.Dial(brokerURL)
 	if err != nil {
 		return fmt.Errorf("amqp dial: %w", err)
@@ -63,6 +68,10 @@ func (r *RabbitMQClient) Close() error {
 // then binds both the primary and secondary queues to the exchange so
 // every published message reaches both consumers.
 func (r *RabbitMQClient) CreateSecondaryQueue(_ context.Context, primaryQueue, exchangeName, _ string) (string, error) {
+	if r.ch == nil {
+		return "", fmt.Errorf("broker channel not connected")
+	}
+
 	// Declare the fanout exchange
 	if err := r.ch.ExchangeDeclare(
 		exchangeName,
@@ -105,6 +114,10 @@ func (r *RabbitMQClient) CreateSecondaryQueue(_ context.Context, primaryQueue, e
 // the secondary queue. The primary queue binding and the shared exchange
 // are left intact so the producer can continue publishing.
 func (r *RabbitMQClient) DeleteSecondaryQueue(_ context.Context, secondaryQueue, primaryQueue, exchangeName string) error {
+	if r.ch == nil {
+		return fmt.Errorf("broker channel not connected")
+	}
+
 	// Unbind only the secondary queue from the fanout exchange
 	if err := r.ch.QueueUnbind(secondaryQueue, "", exchangeName, nil); err != nil {
 		return fmt.Errorf("unbind secondary queue %q from %q: %w", secondaryQueue, exchangeName, err)
@@ -119,6 +132,9 @@ func (r *RabbitMQClient) DeleteSecondaryQueue(_ context.Context, secondaryQueue,
 }
 
 func (r *RabbitMQClient) GetQueueDepth(_ context.Context, queueName string) (int, error) {
+	if r.ch == nil {
+		return 0, fmt.Errorf("broker channel not connected")
+	}
 	q, err := r.ch.QueueInspect(queueName)
 	if err != nil {
 		return 0, fmt.Errorf("inspect queue %q: %w", queueName, err)
@@ -133,6 +149,10 @@ type controlMessage struct {
 }
 
 func (r *RabbitMQClient) SendControlMessage(ctx context.Context, targetPod string, msgType ControlMessageType, payload map[string]interface{}) error {
+	if r.ch == nil {
+		return fmt.Errorf("broker channel not connected")
+	}
+
 	controlQueue := "ms2m.control." + targetPod
 
 	// Declare the control queue (idempotent)
