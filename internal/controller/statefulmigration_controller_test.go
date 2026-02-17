@@ -181,6 +181,7 @@ func TestReconcile_Pending_SetsSourceNode(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	migration := newMigration("mig-pending", migrationv1alpha1.PhasePending)
@@ -230,6 +231,7 @@ func TestReconcile_Pending_DetectsStatefulSetStrategy(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	migration := newMigration("mig-ss", migrationv1alpha1.PhasePending)
@@ -262,6 +264,7 @@ func TestReconcile_Pending_DefaultsShadowPodStrategy(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	migration := newMigration("mig-shadow", migrationv1alpha1.PhasePending)
@@ -406,6 +409,7 @@ func TestReconcile_Finalizing_CompletesWithShadowPod(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	migration := newMigration("mig-final", migrationv1alpha1.PhaseFinalizing)
@@ -538,6 +542,7 @@ func TestReconcile_Transferring_JobComplete(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	r, _, ctx := setupTest(migration, job, sourcePod)
@@ -605,6 +610,7 @@ func TestReconcile_Restoring_ShadowPod_CreatesPod(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	r, _, ctx := setupTest(migration, sourcePod)
@@ -648,6 +654,7 @@ func TestReconcile_Restoring_ShadowPod_PodRunning(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	// Shadow pod already exists and is Running
@@ -782,6 +789,7 @@ func TestReconcile_Pending_ResolvesContainerName(t *testing.T) {
 				{Name: "sidecar", Image: "sidecar:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	migration := newMigration("mig-resolve-ctr", migrationv1alpha1.PhasePending)
@@ -815,6 +823,7 @@ func TestReconcile_Pending_UsesExplicitContainerName(t *testing.T) {
 				{Name: "my-sidecar", Image: "sidecar:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	migration := newMigration("mig-explicit-ctr", migrationv1alpha1.PhasePending)
@@ -975,6 +984,7 @@ func TestReconcile_Restoring_ShadowPod_HasOwnerRef(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	r, _, ctx := setupTest(migration, sourcePod)
@@ -1026,6 +1036,7 @@ func TestReconcile_Restoring_ShadowPod_CopiesSourceLabels(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	r, _, ctx := setupTest(migration, sourcePod)
@@ -1076,6 +1087,7 @@ func TestReconcile_Restoring_UsesContainerName(t *testing.T) {
 				{Name: "my-worker", Image: "worker:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	r, _, ctx := setupTest(migration, sourcePod)
@@ -1136,6 +1148,7 @@ func TestReconcile_Restoring_Sequential_ScalesDownStatefulSet(t *testing.T) {
 				},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	migration := newMigration("mig-seq-restore", migrationv1alpha1.PhaseRestoring)
@@ -1352,6 +1365,7 @@ func TestReconcile_Pending_CapturesSourcePodInfo(t *testing.T) {
 				},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	migration := newMigration("mig-capture", migrationv1alpha1.PhasePending)
@@ -1413,6 +1427,7 @@ func TestReconcile_Restoring_ShadowPod_CopiesFullContainerSpec(t *testing.T) {
 				},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	r, _, ctx := setupTest(migration, sourcePod)
@@ -1560,6 +1575,7 @@ func TestReconcile_Restoring_ShadowPod_PodPending(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	// Shadow pod exists but is Pending (not Running)
@@ -1629,6 +1645,7 @@ func TestReconcile_Transferring_JobComplete_WithStartTime(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	r, _, ctx := setupTest(migration, job, sourcePod)
@@ -1674,6 +1691,7 @@ func TestReconcile_Restoring_ShadowPod_WithSubdomain(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	r, _, ctx := setupTest(migration, sourcePod)
@@ -1956,7 +1974,7 @@ func TestReconcile_Replaying_QueueNotDrained_BackoffPath(t *testing.T) {
 	}
 }
 
-// -- handleFinalizing: END_REPLAY fails --
+// -- handleFinalizing: END_REPLAY fails (non-fatal, migration still completes) --
 func TestReconcile_Finalizing_EndReplayFails(t *testing.T) {
 	migration := newMigration("mig-final-endfail", migrationv1alpha1.PhaseFinalizing)
 	migration.Spec.MigrationStrategy = "ShadowPod"
@@ -1974,8 +1992,8 @@ func TestReconcile_Finalizing_EndReplayFails(t *testing.T) {
 	}
 
 	got := fetchMigration(r, ctx, "mig-final-endfail", "default")
-	if got.Status.Phase != migrationv1alpha1.PhaseFailed {
-		t.Errorf("expected phase Failed when END_REPLAY fails, got %q", got.Status.Phase)
+	if got.Status.Phase != migrationv1alpha1.PhaseCompleted {
+		t.Errorf("expected phase Completed (END_REPLAY failure is non-fatal), got %q", got.Status.Phase)
 	}
 }
 
@@ -2105,6 +2123,7 @@ func TestReconcile_Pending_EmptyContainerName(t *testing.T) {
 			NodeName:   "node-1",
 			Containers: []corev1.Container{}, // empty
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	migration := newMigration("mig-no-ctr", migrationv1alpha1.PhasePending)
@@ -2137,6 +2156,7 @@ func TestReconcile_Pending_UpdateFails(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	migration := newMigration("mig-upd-fail", migrationv1alpha1.PhasePending)
@@ -2172,6 +2192,7 @@ func TestReconcile_Pending_RefetchFails(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	migration := newMigration("mig-refetch-fail", migrationv1alpha1.PhasePending)
@@ -2346,6 +2367,7 @@ func TestReconcile_Restoring_PodCreateAlreadyExists(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	getCalls := 0
@@ -2395,6 +2417,7 @@ func TestReconcile_Restoring_PodCreateOtherError(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	r, _, ctx := setupTestWithInterceptors(interceptor.Funcs{
@@ -2596,6 +2619,7 @@ func TestReconcile_PhaseChaining_RefetchFails(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	migration := newMigration("mig-chain-refetch", migrationv1alpha1.PhasePending)
@@ -2698,6 +2722,7 @@ func TestReconcile_Finalizing_ShadowPod_DeleteFails(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	migration := newMigration("mig-final-delfail", migrationv1alpha1.PhaseFinalizing)
@@ -2890,6 +2915,7 @@ func TestReconcile_Pending_DetectsDeploymentStrategy(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	// The ReplicaSet that owns the pod, itself owned by a Deployment
@@ -2941,6 +2967,7 @@ func TestReconcile_Finalizing_ShadowPod_PatchesDeployment(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	replicas := int32(3)
@@ -3090,6 +3117,7 @@ func TestReconcile_Restoring_DirectMode_UsesNeverPullPolicy(t *testing.T) {
 				{Name: "app", Image: "myapp:latest"},
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	r, _, ctx := setupTest(migration, sourcePod)

@@ -130,6 +130,16 @@ func (r *StatefulMigrationReconciler) handlePending(ctx context.Context, m *migr
 		return ctrl.Result{}, err
 	}
 
+	// Ensure source pod is running and not being deleted
+	if sourcePod.DeletionTimestamp != nil {
+		logger.Info("Source pod is terminating, waiting", "pod", m.Spec.SourcePod)
+		return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
+	}
+	if sourcePod.Status.Phase != corev1.PodRunning {
+		logger.Info("Source pod not Running yet, waiting", "pod", m.Spec.SourcePod, "phase", sourcePod.Status.Phase)
+		return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
+	}
+
 	// Resolve container name
 	containerName := m.Spec.ContainerName
 	if containerName == "" && len(sourcePod.Spec.Containers) > 0 {
@@ -303,7 +313,7 @@ func (r *StatefulMigrationReconciler) handleTransferring(ctx context.Context, m 
 						Containers: []corev1.Container{
 							{
 								Name:            "checkpoint-transfer",
-								Image:           "checkpoint-transfer:latest",
+								Image:           "localhost/checkpoint-transfer:latest",
 								ImagePullPolicy: corev1.PullIfNotPresent,
 								Args:            transferArgs,
 								Env: []corev1.EnvVar{
@@ -644,12 +654,13 @@ func (r *StatefulMigrationReconciler) handleFinalizing(ctx context.Context, m *m
 	base := m.DeepCopy()
 	phaseStart := time.Now()
 
-	// Send END_REPLAY to signal the target pod to switch to the primary queue
+	// Send END_REPLAY and tear down secondary queue.
+	// These are best-effort: if the broker channel was already closed (e.g.,
+	// a stale reconcile re-entering this handler), skip gracefully.
 	if err := r.MsgClient.SendControlMessage(ctx, m.Status.TargetPod, messaging.ControlEndReplay, nil); err != nil {
-		return r.failMigration(ctx, m, fmt.Sprintf("send END_REPLAY: %v", err))
+		logger.Error(err, "Failed to send END_REPLAY, continuing anyway")
 	}
 
-	// Tear down the secondary queue
 	secondaryQueue := m.Spec.MessageQueueConfig.QueueName + ".ms2m-replay"
 	if err := r.MsgClient.DeleteSecondaryQueue(ctx, secondaryQueue, m.Spec.MessageQueueConfig.QueueName, m.Spec.MessageQueueConfig.ExchangeName); err != nil {
 		logger.Error(err, "Failed to delete secondary queue, continuing anyway")
@@ -728,7 +739,14 @@ func (r *StatefulMigrationReconciler) handleFinalizing(ctx context.Context, m *m
 	r.recordPhaseTiming(m, "Finalizing", time.Since(phaseStart))
 	logger.Info("Migration finalized successfully")
 
-	return r.transitionPhase(ctx, m, base, migrationv1alpha1.PhaseCompleted)
+	// Use direct patch instead of transitionPhase to avoid phase chaining.
+	// The informer cache may return a stale "Finalizing" phase after the patch,
+	// causing the loop to re-enter handleFinalizing with a nil broker channel.
+	m.Status.Phase = migrationv1alpha1.PhaseCompleted
+	if err := r.Status().Patch(ctx, m, client.MergeFrom(base)); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
 }
 
 // ---------------------------------------------------------------------------
