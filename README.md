@@ -195,7 +195,7 @@ SHADOW is the implementation of a multi-year research effort on live migration o
 
 2. **H. Dinh-Tuan and J. Jiang**, "Optimizing Stateful Microservice Migration in Kubernetes with MS2M and Forensic Checkpointing," *2025 28th Conference on Innovation in Clouds, Internet and Networks (ICIN)*, 2025. [[IEEE]](https://ieeexplore.ieee.org/abstract/document/10942720)
 
-3. **H. Dinh-Tuan**, "SHADOW: Seamless Handoff And Zero-Downtime Orchestrated Workload Migration for Stateful Microservices," 2025. *(under review)*
+3. **H. Dinh-Tuan**, "SHADOW: Seamless Handoff And Zero-Downtime Orchestrated Workload Migration for Stateful Microservices," 2026. *(under review)*
 
 ## License
 
