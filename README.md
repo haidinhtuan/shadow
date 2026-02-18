@@ -500,17 +500,26 @@ This operator is the engineering realization of a multi-year research effort on 
 
    Bridged the gap between the MS2M concept and Kubernetes. Integrated Forensic Container Checkpointing (FCC) via the kubelet API, introduced a Sequential migration strategy for StatefulSet-managed pods, and added a Threshold-Based Cutoff Mechanism to bound the replay phase under high message rates. Still orchestrated by an imperative Python Migration Manager. Demonstrated up to **96.99% downtime reduction** compared to cold migration and 81.81% total migration time reduction at high load.
 
-### Advancing Beyond the Papers
+### Conceptual Contributions
 
-This operator replaces the imperative Python Migration Manager from both papers with a declarative Kubernetes operator built on controller-runtime. Beyond this architectural shift, it introduces mechanisms not present in either publication:
+This operator introduces three new ideas not present in either publication:
 
-- **ShadowPod strategy for StatefulSet-managed pods** -- Both papers require Sequential (scale-to-zero) for StatefulSets. This operator enables source and target to coexist during replay even for StatefulSet pods, with finalization handling the scale-down. This eliminates the downtime window where the source is stopped before the target exists.
-- **Direct node-to-node checkpoint transfer** -- Both papers describe only registry-based transfer. The ms2m-agent DaemonSet enables registry-free transfer via direct HTTP POST between nodes.
-- **Deployment-aware finalization** -- Neither paper addresses Deployment-managed pods. The operator patches Deployment `nodeAffinity` to ensure replacement pods land on the target node.
+1. **ShadowPod migration for identity-bound (StatefulSet) workloads.** Both papers treat StatefulSet pods as requiring Sequential migration -- the source must be killed before the target is created because Kubernetes enforces unique pod identities. This operator shows that constraint can be sidestepped: a shadow pod with a different name (e.g., `consumer-0-shadow`) carries the same app labels and serves traffic via the Service, then the StatefulSet is scaled down to remove the original. The identity conflict is avoided because the shadow pod is not owned by the StatefulSet. This is a new migration strategy variant that reduces downtime for StatefulSet workloads compared to anything described in either paper.
+
+2. **Registry-free direct checkpoint transfer.** Both papers assume an OCI registry as the transfer intermediary (push from source node, pull on target node). This operator introduces a direct transfer path: the checkpoint tarball is streamed node-to-node via HTTP to a DaemonSet agent that loads it into the local container runtime. This eliminates the registry as an infrastructure dependency and removes the push-pull round-trip -- a different transfer topology (point-to-point vs. hub-and-spoke).
+
+3. **Deployment-aware migration with affinity steering.** Neither paper addresses Deployment-managed pods -- they only consider standalone pods and StatefulSets. This operator handles the Deployment case by patching the owning Deployment's pod template with `nodeAffinity` after migration, ensuring the Deployment controller schedules future pods on the target node. This extends the scope of MS2M from StatefulSet/standalone workloads to the most common Kubernetes workload type.
+
+### Engineering Advancements
+
+Beyond the conceptual contributions, this operator replaces the imperative Python Migration Manager from both papers with a declarative Kubernetes operator built on controller-runtime, and introduces several engineering refinements:
+
 - **Automatic strategy detection** -- Inspects `ownerReferences` to select the appropriate strategy without manual configuration.
-- **Phase chaining and exponential backoff** -- Reconciler optimizations that reduce API server round-trips and load during long-running migration phases.
-- **Uncompressed OCI image layers** -- Eliminates unnecessary gzip compression for cluster-local checkpoint transfer.
-- **CRIU-aware hostname resolution** -- Solves the control queue routing problem caused by `gethostname()` returning the checkpointed UTS hostname after restore.
+- **Phase chaining** -- Synchronously completed phases are chained within a single reconcile call, eliminating work queue round-trips.
+- **Exponential polling backoff** -- Adaptive requeue intervals (1s -> 2s -> 5s) for long-running async phases, reducing API server load.
+- **Uncompressed OCI image layers** -- Eliminates unnecessary gzip compression for cluster-local checkpoint transfer where CPU cost outweighs bandwidth savings.
+- **Source pod metadata caching** -- Caches labels and container specs in the CRD status during Pending so they survive source pod deletion in Sequential strategy.
+- **CRIU-aware hostname resolution** -- After checkpoint/restore, `gethostname()` returns the checkpointed UTS hostname. The consumer reads `/etc/hostname` (bind-mounted by the container runtime) to get the actual pod name for correct control queue routing.
 
 ## License
 
