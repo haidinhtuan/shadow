@@ -80,9 +80,13 @@ spec:
           def run():
               while True:
                   try:
-                      # Re-evaluate hostname on each reconnect so CRIU-restored
-                      # processes pick up the new pod name (e.g. shadow pod).
-                      hostname = socket.gethostname()
+                      # Read hostname from /etc/hostname (bind-mounted by CRI-O)
+                      # instead of socket.gethostname() which returns the CRIU-
+                      # restored UTS hostname after checkpoint/restore.
+                      try:
+                          hostname = open('/etc/hostname').read().strip()
+                      except Exception:
+                          hostname = socket.gethostname()
                       ctrl_queue = f'ms2m.control.{hostname}'
 
                       conn = pika.BlockingConnection(pika.URLParameters(broker))
@@ -142,7 +146,7 @@ spec:
           exec python3 /tmp/consumer.py
         env:
         - name: PROCESSING_DELAY_MS
-          value: "50"
+          value: "10"
         - name: RABBITMQ_URL
           value: "amqp://guest:guest@rabbitmq.rabbitmq.svc.cluster.local:5672/"
         - name: QUEUE_NAME
@@ -150,3 +154,10 @@ spec:
         ports:
         - containerPort: 8080
           name: http
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 1
+          periodSeconds: 1
+          failureThreshold: 3
