@@ -183,8 +183,33 @@ config/
   manager/                             Operator Deployment manifest
   daemonset/                           ms2m-agent DaemonSet + Service
 eval/
+  results/                             Evaluation CSV data (210 runs)
   workloads/                           Consumer workload manifests
-  scripts/                             Evaluation scripts with downtime measurement
+  scripts/                             Evaluation and downtime measurement scripts
+```
+
+## Evaluation Results
+
+Evaluated on a 3-node bare-metal Kubernetes cluster (IONOS Cloud, 4 vCPUs / 8 GB RAM per node, CRI-O + CRIU v4.0). Three configurations across seven message rates (10--120 msg/s), 10 repetitions each, totaling **210 migration runs**.
+
+| Metric | Sequential (baseline) | ShadowPod |
+|:-------|:---------------------|:----------|
+| **Service downtime** | ~31 s | **0 ms** (140/140 runs) |
+| **Restore phase** | ~38.5 s | ~2.9 s (92% reduction) |
+| **Total time @ 10 msg/s** | 50.8 s | 12.4--13.8 s (73--76% reduction) |
+| **Total time @ 120 msg/s** | 164.8 s | 129.0--129.2 s (22% reduction) |
+| **Message loss** | 0 | 0 |
+
+Raw evaluation data is available in [`eval/results/`](eval/results/).
+
+To reproduce the evaluation:
+
+```bash
+# Run all 210 evaluation runs (3 configs x 7 rates x 10 reps)
+./eval/scripts/run_all_evaluations.sh
+
+# Run a single configuration
+./eval/scripts/run_optimized_evaluation.sh statefulset-shadowpod 10,20,40,60,80,100,120 10
 ```
 
 ## Publications
