@@ -46,6 +46,7 @@ cover.out
 
 # Evaluation infrastructure (contains provider-specific scripts and secrets)
 eval/infra/
+eval/results/raw-cluster-archive/
 
 # Reference papers (PDFs in papers/ except main.tex)
 papers/*.pdf
