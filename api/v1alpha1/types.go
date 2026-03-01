@@ -104,6 +104,13 @@ type StatefulMigrationStatus struct {
 
 	// SourceContainers stores the source pod's container specs for use during restore
 	SourceContainers []corev1.Container `json:"sourceContainers,omitempty"`
+
+	// SwapSubPhase tracks progress of the local identity swap for ShadowPod+StatefulSet.
+	// Empty when not performing a swap.
+	SwapSubPhase string `json:"swapSubPhase,omitempty"`
+
+	// ReplacementPod is the name of the correctly-named replacement pod created during identity swap.
+	ReplacementPod string `json:"replacementPod,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -188,6 +188,14 @@ spec:
               targetPod:
                 description: TargetPod is the name of the restored pod
                 type: string
+              swapSubPhase:
+                description: SwapSubPhase tracks progress of the local identity swap
+                  for ShadowPod+StatefulSet migrations. Empty when not performing a swap.
+                type: string
+              replacementPod:
+                description: ReplacementPod is the name of the correctly-named replacement
+                  pod created during identity swap.
+                type: string
             type: object
     served: true
     storage: true
