@@ -1335,10 +1335,14 @@ func (r *StatefulMigrationReconciler) handleSwapTrafficSwitch(ctx context.Contex
 		logger.Error(err, "Failed to delete swap queue, continuing anyway")
 	}
 
-	// Delete the shadow pod
+	// Force-delete the shadow pod with a short grace period so that a
+	// subsequent migration doesn't wait for the default 30s termination.
 	shadowPod := &corev1.Pod{}
 	if err := r.Get(ctx, types.NamespacedName{Name: m.Status.TargetPod, Namespace: m.Namespace}, shadowPod); err == nil {
-		if err := r.Delete(ctx, shadowPod); err != nil {
+		gracePeriod := int64(1)
+		if err := r.Delete(ctx, shadowPod, &client.DeleteOptions{
+			GracePeriodSeconds: &gracePeriod,
+		}); err != nil {
 			logger.Error(err, "Failed to delete shadow pod", "pod", m.Status.TargetPod)
 		} else {
 			logger.Info("Deleted shadow pod", "pod", m.Status.TargetPod)
