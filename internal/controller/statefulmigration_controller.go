@@ -1168,6 +1168,35 @@ func (r *StatefulMigrationReconciler) handleSwapCreateReplacement(ctx context.Co
 			}
 		}
 
+		// Remove Service-matching labels from the original pod BEFORE
+		// deleting it. This removes the pod from the Service endpoints,
+		// so DNS resolves only to the shadow pod's IP. Traffic seamlessly
+		// shifts to the shadow pod with no gap.
+		if existing.Labels != nil {
+			podPatch := client.MergeFrom(existing.DeepCopy())
+			changed := false
+			for k := range m.Status.SourcePodLabels {
+				if _, has := existing.Labels[k]; has {
+					// Keep StatefulSet-internal labels — only remove
+					// labels that could match a Service selector.
+					if k == "controller-revision-hash" ||
+						k == "statefulset.kubernetes.io/pod-name" ||
+						k == "apps.kubernetes.io/pod-index" {
+						continue
+					}
+					delete(existing.Labels, k)
+					changed = true
+				}
+			}
+			if changed {
+				if patchErr := r.Patch(ctx, existing, podPatch); patchErr != nil {
+					logger.Error(patchErr, "Failed to remove Service labels from original pod")
+				} else {
+					logger.Info("Removed Service labels from original pod for traffic drain", "pod", replacementName)
+				}
+			}
+		}
+
 		// Force-delete the original pod with a short grace period.
 		// Its state is already re-checkpointed, so graceful shutdown
 		// adds no value and the default 30s grace period dominates
