@@ -1,8 +1,12 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -260,28 +264,56 @@ func (r *StatefulMigrationReconciler) handleCheckpointing(ctx context.Context, m
 	return r.transitionPhase(ctx, m, base, migrationv1alpha1.PhaseTransferring)
 }
 
-// handleTransferring creates a Kubernetes Job that runs the checkpoint-transfer
-// tool on the source node to build an OCI image from the checkpoint archive
-// and push it to the configured registry.
+// handleTransferring builds an OCI image from the checkpoint archive and pushes
+// it to the configured registry. It first tries a direct HTTP call to the
+// ms2m-agent DaemonSet on the source node (fast path, no Job overhead). If no
+// agent is available, it falls back to creating a Kubernetes Job.
 func (r *StatefulMigrationReconciler) handleTransferring(ctx context.Context, m *migrationv1alpha1.StatefulMigration) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	ensurePhaseTimings(m)
+
+	// Fast path: direct HTTP call to ms2m-agent on source node.
+	// Only for Registry mode — Direct mode uses the checkpoint-transfer Job
+	// which POSTs the tar across nodes.
+	if m.Spec.TransferMode != "Direct" {
+		agentIP, agentErr := r.findAgentPodIP(ctx, m.Status.SourceNode)
+		if agentErr == nil {
+			base := m.DeepCopy()
+			phaseStart := time.Now()
+
+			imageRef := fmt.Sprintf("%s/%s:checkpoint", m.Spec.CheckpointImageRepository, m.Spec.SourcePod)
+			if err := r.callAgentRegistryPush(ctx, agentIP, m.Status.CheckpointID, m.Status.ContainerName, imageRef); err != nil {
+				return r.failMigration(ctx, m, fmt.Sprintf("agent registry-push: %v", err))
+			}
+
+			r.recordPhaseTiming(m, "Transferring", time.Since(phaseStart))
+			logger.Info("Transfer complete via agent", "duration", time.Since(phaseStart))
+			return r.transitionPhase(ctx, m, base, migrationv1alpha1.PhaseRestoring)
+		}
+		logger.Info("No ms2m-agent found, falling back to transfer Job", "node", m.Status.SourceNode, "err", agentErr)
+	}
+
+	// Fallback: Job-based transfer
+	return r.handleTransferringViaJob(ctx, m)
+}
+
+// handleTransferringViaJob creates a Kubernetes Job to build and push the
+// checkpoint image. Used when the ms2m-agent DaemonSet is not available or
+// for Direct transfer mode.
+func (r *StatefulMigrationReconciler) handleTransferringViaJob(ctx context.Context, m *migrationv1alpha1.StatefulMigration) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
 	jobName := m.Name + "-transfer"
 
-	// Check if the Job already exists
 	existingJob := &batchv1.Job{}
 	err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: m.Namespace}, existingJob)
 
 	if errors.IsNotFound(err) {
-		// Record the phase start when we first create the job
 		if _, ok := m.Status.PhaseTimings["Transferring.start"]; !ok {
 			patch := client.MergeFrom(m.DeepCopy())
 			m.Status.PhaseTimings["Transferring.start"] = time.Now().Format(time.RFC3339)
 			_ = r.Status().Patch(ctx, m, patch)
 		}
 
-		// Build the transfer Job spec.
-		// Determine the transfer destination based on TransferMode.
 		var transferArgs []string
 		if m.Spec.TransferMode == "Direct" {
 			agentURL := fmt.Sprintf("http://ms2m-agent.ms2m-system.svc.cluster.local:9443/checkpoint")
@@ -364,10 +396,8 @@ func (r *StatefulMigrationReconciler) handleTransferring(ctx context.Context, m 
 		return ctrl.Result{}, err
 	}
 
-	// Job exists, check if it completed
 	if existingJob.Status.Succeeded >= 1 {
 		base := m.DeepCopy()
-		// Parse the phase start time to calculate duration
 		var duration time.Duration
 		if startStr, ok := m.Status.PhaseTimings["Transferring.start"]; ok {
 			if startTime, err := time.Parse(time.RFC3339, startStr); err == nil {
@@ -380,7 +410,6 @@ func (r *StatefulMigrationReconciler) handleTransferring(ctx context.Context, m 
 		return r.transitionPhase(ctx, m, base, migrationv1alpha1.PhaseRestoring)
 	}
 
-	// Still running — use exponential backoff based on elapsed time
 	logger.Info("Waiting for transfer job", "job", jobName)
 	return ctrl.Result{RequeueAfter: r.pollingBackoff(m, "Transferring.start")}, nil
 }
@@ -923,14 +952,40 @@ func (r *StatefulMigrationReconciler) handleSwapReCheckpoint(ctx context.Context
 }
 
 // handleSwapTransfer loads the re-checkpoint into the target node's local
-// containers-storage via the ms2m-agent's local-load command. Since the
-// re-checkpoint tar is already on the target node, no network transfer is
-// needed — just build the OCI image and load it locally via skopeo.
+// containers-storage. It first tries a direct HTTP call to the ms2m-agent
+// DaemonSet on the target node (fast path). Falls back to a Job if no agent
+// is available.
 func (r *StatefulMigrationReconciler) handleSwapTransfer(ctx context.Context, m *migrationv1alpha1.StatefulMigration, base client.Object) (ctrl.Result, bool, error) {
 	logger := log.FromContext(ctx)
 
-	jobName := m.Name + "-swap-transfer"
 	imageTag := fmt.Sprintf("localhost/checkpoint/%s:recheckpoint", m.Status.ContainerName)
+
+	// Fast path: direct HTTP call to ms2m-agent on target node
+	agentIP, agentErr := r.findAgentPodIP(ctx, m.Spec.TargetNode)
+	if agentErr == nil {
+		if err := r.callAgentLocalLoad(ctx, agentIP, m.Status.CheckpointID, m.Status.ContainerName, imageTag); err != nil {
+			return ctrl.Result{}, false, fmt.Errorf("agent local-load: %w", err)
+		}
+
+		logger.Info("Swap local-load complete via agent", "imageTag", imageTag)
+		patch := client.MergeFrom(m.DeepCopy())
+		m.Status.SwapSubPhase = "CreateReplacement"
+		if err := r.Status().Patch(ctx, m, patch); err != nil {
+			return ctrl.Result{}, false, err
+		}
+		return ctrl.Result{Requeue: true}, false, nil
+	}
+
+	logger.Info("No ms2m-agent found, falling back to swap transfer Job", "node", m.Spec.TargetNode, "err", agentErr)
+	return r.handleSwapTransferViaJob(ctx, m, base, imageTag)
+}
+
+// handleSwapTransferViaJob creates a Job to load the re-checkpoint into
+// containers-storage. Used when the ms2m-agent DaemonSet is not available.
+func (r *StatefulMigrationReconciler) handleSwapTransferViaJob(ctx context.Context, m *migrationv1alpha1.StatefulMigration, base client.Object, imageTag string) (ctrl.Result, bool, error) {
+	logger := log.FromContext(ctx)
+
+	jobName := m.Name + "-swap-transfer"
 
 	existingJob := &batchv1.Job{}
 	err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: m.Namespace}, existingJob)
@@ -1015,7 +1070,6 @@ func (r *StatefulMigrationReconciler) handleSwapTransfer(ctx context.Context, m 
 		return ctrl.Result{}, false, err
 	}
 
-	// Job exists — check completion
 	if existingJob.Status.Succeeded >= 1 {
 		logger.Info("Swap local-load job completed", "job", jobName)
 		patch := client.MergeFrom(m.DeepCopy())
@@ -1384,6 +1438,79 @@ func (r *StatefulMigrationReconciler) pollingBackoff(m *migrationv1alpha1.Statef
 		}
 	}
 	return minInterval
+}
+
+// ---------------------------------------------------------------------------
+// ms2m-agent DaemonSet HTTP helpers
+// ---------------------------------------------------------------------------
+
+// findAgentPodIP looks up the ms2m-agent DaemonSet pod running on the given
+// node and returns its pod IP. Returns an error if no running agent is found.
+func (r *StatefulMigrationReconciler) findAgentPodIP(ctx context.Context, nodeName string) (string, error) {
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList,
+		client.InNamespace("ms2m-system"),
+		client.MatchingLabels{"app": "ms2m-agent"},
+	); err != nil {
+		return "", fmt.Errorf("list agent pods: %w", err)
+	}
+
+	for _, p := range podList.Items {
+		if p.Spec.NodeName == nodeName && p.Status.Phase == corev1.PodRunning && p.Status.PodIP != "" {
+			return p.Status.PodIP, nil
+		}
+	}
+	return "", fmt.Errorf("no running ms2m-agent found on node %s", nodeName)
+}
+
+// callAgentRegistryPush calls the ms2m-agent's /registry-push endpoint to
+// build an OCI image from the checkpoint tar and push it to the registry.
+func (r *StatefulMigrationReconciler) callAgentRegistryPush(ctx context.Context, agentIP, tarPath, containerName, imageRef string) error {
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"tarPath":       tarPath,
+		"containerName": containerName,
+		"imageRef":      imageRef,
+		"insecure":      true,
+	})
+	return r.callAgent(ctx, agentIP, "/registry-push", reqBody)
+}
+
+// callAgentLocalLoad calls the ms2m-agent's /local-load endpoint to build
+// an OCI image from the checkpoint tar and load it into containers-storage.
+func (r *StatefulMigrationReconciler) callAgentLocalLoad(ctx context.Context, agentIP, tarPath, containerName, imageTag string) error {
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"tarPath":       tarPath,
+		"containerName": containerName,
+		"imageTag":      imageTag,
+	})
+	return r.callAgent(ctx, agentIP, "/local-load", reqBody)
+}
+
+// callAgent makes a POST request to the ms2m-agent at the given IP and path.
+func (r *StatefulMigrationReconciler) callAgent(ctx context.Context, agentIP, path string, body []byte) error {
+	url := fmt.Sprintf("http://%s:9443%s", agentIP, path)
+
+	httpCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("HTTP call to agent %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("agent returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

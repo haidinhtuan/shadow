@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/haidinhtuan/kubernetes-controller/internal/checkpoint"
@@ -138,6 +141,86 @@ func localLoad(tarPath, containerName, imageTag string) error {
 	return nil
 }
 
+// registryPush builds an OCI image from a checkpoint tar and pushes it to a
+// container registry via crane.
+func registryPush(tarPath, containerName, imageRef string, insecure bool) error {
+	fmt.Printf("Registry push: building image from %s\n", tarPath)
+
+	img, err := checkpoint.BuildCheckpointImage(tarPath, containerName)
+	if err != nil {
+		return fmt.Errorf("build image: %w", err)
+	}
+
+	opts := []crane.Option{crane.WithAuthFromKeychain(authn.DefaultKeychain)}
+	if insecure {
+		opts = append(opts, crane.Insecure)
+	}
+
+	if err := crane.Push(img, imageRef, opts...); err != nil {
+		return fmt.Errorf("push image: %w", err)
+	}
+
+	fmt.Printf("Pushed image to registry: %s\n", imageRef)
+	return nil
+}
+
+// handleLocalLoad handles POST /local-load requests from the controller.
+func handleLocalLoad(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		TarPath       string `json:"tarPath"`
+		ContainerName string `json:"containerName"`
+		ImageTag      string `json:"imageTag"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	start := time.Now()
+	if err := localLoad(req.TarPath, req.ContainerName, req.ImageTag); err != nil {
+		http.Error(w, fmt.Sprintf("local-load: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Printf("local-load completed in %s\n", time.Since(start))
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "local-load completed successfully")
+}
+
+// handleRegistryPush handles POST /registry-push requests from the controller.
+func handleRegistryPush(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		TarPath       string `json:"tarPath"`
+		ContainerName string `json:"containerName"`
+		ImageRef      string `json:"imageRef"`
+		Insecure      bool   `json:"insecure"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	start := time.Now()
+	if err := registryPush(req.TarPath, req.ContainerName, req.ImageRef, req.Insecure); err != nil {
+		http.Error(w, fmt.Sprintf("registry-push: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Printf("registry-push completed in %s\n", time.Since(start))
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "registry-push completed successfully")
+}
+
 func main() {
 	// CLI mode: ms2m-agent local-load <tar-path> <container-name> <image-tag>
 	if len(os.Args) > 1 && os.Args[1] == "local-load" {
@@ -158,7 +241,15 @@ func main() {
 	}
 	os.MkdirAll(storageDir, 0755)
 
+	mux := http.NewServeMux()
+
+	// Existing checkpoint upload handler (Direct transfer mode)
 	handler := &checkpointHandler{storageDir: storageDir}
+	mux.Handle("/checkpoint", handler)
+
+	// New endpoints: controller calls these instead of creating Jobs
+	mux.HandleFunc("/local-load", handleLocalLoad)
+	mux.HandleFunc("/registry-push", handleRegistryPush)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -166,7 +257,7 @@ func main() {
 	}
 
 	fmt.Printf("ms2m-agent listening on :%s\n", port)
-	if err := http.ListenAndServe(":"+port, handler); err != nil {
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 		os.Exit(1)
 	}
