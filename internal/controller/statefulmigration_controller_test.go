@@ -3460,3 +3460,48 @@ func TestReconcile_Finalizing_ShadowPod_StatefulSet_EntersSwap(t *testing.T) {
 		t.Error("expected swap secondary queue 'orders.ms2m-replay' to be created")
 	}
 }
+
+func TestReconcile_Finalizing_Swap_ReCheckpoint(t *testing.T) {
+	migration := newMigration("mig-swap-ckpt", migrationv1alpha1.PhaseFinalizing)
+	migration.Spec.SourcePod = "consumer-0"
+	migration.Spec.MigrationStrategy = "ShadowPod"
+	migration.Spec.TargetNode = "node-2"
+	migration.Status.TargetPod = "consumer-0-shadow"
+	migration.Status.SourceNode = "node-1"
+	migration.Status.StatefulSetName = "consumer"
+	migration.Status.ContainerName = "app"
+	migration.Status.SwapSubPhase = "ReCheckpoint"
+	migration.Status.PhaseTimings = map[string]string{}
+
+	shadowPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "consumer-0-shadow",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName:   "node-2",
+			Containers: []corev1.Container{{Name: "app", Image: "consumer:latest"}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	r, mockBroker, ctx := setupTest(migration, shadowPod)
+	mockBroker.Connected = true
+
+	_, err := reconcileOnce(r, ctx, "mig-swap-ckpt", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := fetchMigration(r, ctx, "mig-swap-ckpt", "default")
+
+	// Should advance to CreateReplacement
+	if got.Status.SwapSubPhase != "CreateReplacement" {
+		t.Errorf("expected SwapSubPhase %q, got %q", "CreateReplacement", got.Status.SwapSubPhase)
+	}
+
+	// CheckpointID should be updated (re-checkpoint of shadow pod)
+	if got.Status.CheckpointID == "" {
+		t.Error("expected CheckpointID to be set after re-checkpoint")
+	}
+}

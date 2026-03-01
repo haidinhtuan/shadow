@@ -839,8 +839,42 @@ func (r *StatefulMigrationReconciler) handleSwapPrepare(ctx context.Context, m *
 
 // handleSwapReCheckpoint triggers a CRIU checkpoint on the shadow pod (same node, no transfer).
 func (r *StatefulMigrationReconciler) handleSwapReCheckpoint(ctx context.Context, m *migrationv1alpha1.StatefulMigration, base client.Object) (ctrl.Result, bool, error) {
-	// TODO: implement in next task
-	return ctrl.Result{RequeueAfter: 1 * time.Second}, false, nil
+	logger := log.FromContext(ctx)
+
+	// The shadow pod is on the target node (where it was restored to during migration)
+	targetNode := m.Spec.TargetNode
+
+	if r.KubeletClient != nil {
+		resp, err := r.KubeletClient.Checkpoint(
+			ctx,
+			targetNode,
+			m.Namespace,
+			m.Status.TargetPod, // shadow pod name
+			m.Status.ContainerName,
+		)
+		if err != nil {
+			return ctrl.Result{}, false, fmt.Errorf("re-checkpoint shadow pod: %w", err)
+		}
+		if len(resp.Items) > 0 {
+			patch := client.MergeFrom(m.DeepCopy())
+			m.Status.CheckpointID = resp.Items[0]
+			m.Status.SwapSubPhase = "CreateReplacement"
+			if err := r.Status().Patch(ctx, m, patch); err != nil {
+				return ctrl.Result{}, false, err
+			}
+		}
+	} else {
+		// Test/dev fallback
+		patch := client.MergeFrom(m.DeepCopy())
+		m.Status.CheckpointID = fmt.Sprintf("/var/lib/kubelet/checkpoints/checkpoint-%s.tar", m.Status.TargetPod)
+		m.Status.SwapSubPhase = "CreateReplacement"
+		if err := r.Status().Patch(ctx, m, patch); err != nil {
+			return ctrl.Result{}, false, err
+		}
+	}
+
+	logger.Info("ReCheckpoint complete", "shadowPod", m.Status.TargetPod, "checkpointID", m.Status.CheckpointID)
+	return ctrl.Result{Requeue: true}, false, nil
 }
 
 // handleSwapCreateReplacement creates a pod with the correct StatefulSet name from the re-checkpoint image.
