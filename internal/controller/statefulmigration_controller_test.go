@@ -2082,6 +2082,8 @@ func TestReconcile_Finalizing_Sequential_StatefulSetNotFound(t *testing.T) {
 
 // -- handleFinalizing: ShadowPod + StatefulSet scales down instead of deleting pod --
 func TestReconcile_Finalizing_ShadowPod_ScalesDownStatefulSet(t *testing.T) {
+	// This test now verifies that ShadowPod+StatefulSet enters the identity swap
+	// instead of just scaling down and completing.
 	stsReplicas := int32(1)
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -2100,29 +2102,16 @@ func TestReconcile_Finalizing_ShadowPod_ScalesDownStatefulSet(t *testing.T) {
 		},
 	}
 
-	sourcePod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "consumer-0",
-			Namespace: "default",
-		},
-		Spec: corev1.PodSpec{
-			NodeName: "node-1",
-			Containers: []corev1.Container{
-				{Name: "app", Image: "consumer:latest"},
-			},
-		},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
-	}
-
 	migration := newMigration("mig-final-shadow-sts", migrationv1alpha1.PhaseFinalizing)
 	migration.Spec.SourcePod = "consumer-0"
 	migration.Spec.MigrationStrategy = "ShadowPod"
 	migration.Status.TargetPod = "consumer-0-shadow"
 	migration.Status.SourceNode = "node-1"
 	migration.Status.StatefulSetName = "consumer"
+	migration.Status.ContainerName = "app"
 	migration.Status.PhaseTimings = map[string]string{}
 
-	r, mockBroker, ctx := setupTest(migration, sts, sourcePod)
+	r, mockBroker, ctx := setupTest(migration, sts)
 	mockBroker.Connected = true
 
 	_, err := reconcileOnce(r, ctx, "mig-final-shadow-sts", "default")
@@ -2131,27 +2120,17 @@ func TestReconcile_Finalizing_ShadowPod_ScalesDownStatefulSet(t *testing.T) {
 	}
 
 	got := fetchMigration(r, ctx, "mig-final-shadow-sts", "default")
-	if got.Status.Phase != migrationv1alpha1.PhaseCompleted {
-		t.Errorf("expected phase %q, got %q", migrationv1alpha1.PhaseCompleted, got.Status.Phase)
-	}
 
-	// Verify StatefulSet was scaled down by 1 (from 1 to 0)
-	updatedSts := &appsv1.StatefulSet{}
-	if err := r.Get(ctx, types.NamespacedName{Name: "consumer", Namespace: "default"}, updatedSts); err != nil {
-		t.Fatalf("failed to get StatefulSet: %v", err)
+	// Should enter swap sub-phases, not complete immediately
+	if got.Status.Phase == migrationv1alpha1.PhaseCompleted {
+		t.Error("ShadowPod+StatefulSet should enter identity swap, not complete immediately")
 	}
-	if *updatedSts.Spec.Replicas != 0 {
-		t.Errorf("expected StatefulSet replicas 0, got %d", *updatedSts.Spec.Replicas)
-	}
-
-	// Verify source pod was NOT directly deleted (StatefulSet manages it)
-	pod := &corev1.Pod{}
-	if err := r.Get(ctx, types.NamespacedName{Name: "consumer-0", Namespace: "default"}, pod); err != nil {
-		t.Errorf("source pod should still exist (StatefulSet will handle deletion), but got error: %v", err)
+	if got.Status.SwapSubPhase == "" {
+		t.Error("expected SwapSubPhase to be set")
 	}
 }
 
-// -- handleFinalizing: ShadowPod + multi-replica StatefulSet scales down by 1 --
+// -- handleFinalizing: ShadowPod + multi-replica StatefulSet enters identity swap --
 func TestReconcile_Finalizing_ShadowPod_MultiReplicaStatefulSet(t *testing.T) {
 	stsReplicas := int32(3)
 	sts := &appsv1.StatefulSet{
@@ -2171,29 +2150,16 @@ func TestReconcile_Finalizing_ShadowPod_MultiReplicaStatefulSet(t *testing.T) {
 		},
 	}
 
-	sourcePod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "consumer-0",
-			Namespace: "default",
-		},
-		Spec: corev1.PodSpec{
-			NodeName: "node-1",
-			Containers: []corev1.Container{
-				{Name: "app", Image: "consumer:latest"},
-			},
-		},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
-	}
-
 	migration := newMigration("mig-final-shadow-multi", migrationv1alpha1.PhaseFinalizing)
 	migration.Spec.SourcePod = "consumer-0"
 	migration.Spec.MigrationStrategy = "ShadowPod"
 	migration.Status.TargetPod = "consumer-0-shadow"
 	migration.Status.SourceNode = "node-1"
 	migration.Status.StatefulSetName = "consumer"
+	migration.Status.ContainerName = "app"
 	migration.Status.PhaseTimings = map[string]string{}
 
-	r, mockBroker, ctx := setupTest(migration, sts, sourcePod)
+	r, mockBroker, ctx := setupTest(migration, sts)
 	mockBroker.Connected = true
 
 	_, err := reconcileOnce(r, ctx, "mig-final-shadow-multi", "default")
@@ -2202,17 +2168,13 @@ func TestReconcile_Finalizing_ShadowPod_MultiReplicaStatefulSet(t *testing.T) {
 	}
 
 	got := fetchMigration(r, ctx, "mig-final-shadow-multi", "default")
-	if got.Status.Phase != migrationv1alpha1.PhaseCompleted {
-		t.Errorf("expected phase %q, got %q", migrationv1alpha1.PhaseCompleted, got.Status.Phase)
-	}
 
-	// Verify StatefulSet was scaled down by 1 (from 3 to 2), not to 0
-	updatedSts := &appsv1.StatefulSet{}
-	if err := r.Get(ctx, types.NamespacedName{Name: "consumer", Namespace: "default"}, updatedSts); err != nil {
-		t.Fatalf("failed to get StatefulSet: %v", err)
+	// Should enter swap sub-phases, not complete immediately
+	if got.Status.Phase == migrationv1alpha1.PhaseCompleted {
+		t.Error("ShadowPod+StatefulSet should enter identity swap, not complete immediately")
 	}
-	if *updatedSts.Spec.Replicas != 2 {
-		t.Errorf("expected StatefulSet replicas 2, got %d", *updatedSts.Spec.Replicas)
+	if got.Status.SwapSubPhase == "" {
+		t.Error("expected SwapSubPhase to be set")
 	}
 }
 
