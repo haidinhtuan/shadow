@@ -73,7 +73,7 @@ Creates a shadow pod (e.g., `consumer-0-shadow`) on the target node while the so
 
 ### Sequential (baseline)
 
-For StatefulSet pods with strict identity requirements. Scales the StatefulSet to zero, waits for source termination, then creates the target pod with the same identity from the checkpoint image. Incurs ~38s downtime due to the StatefulSet scale-down/up cycle.
+For StatefulSet pods with strict identity requirements. Scales the StatefulSet to zero, waits for source termination, then creates the target pod with the same identity from the checkpoint image. During finalization, the controller removes its ownerReference from the target pod and scales the StatefulSet back up, allowing automatic adoption by the StatefulSet controller. Incurs ~38s downtime due to the StatefulSet scale-down/up cycle.
 
 ### Auto-Detection
 
@@ -81,7 +81,7 @@ When `migrationStrategy` is omitted, SHADOW inspects the source pod's `ownerRefe
 - StatefulSet → defaults to **Sequential**
 - Deployment/standalone → defaults to **ShadowPod**
 
-Set `migrationStrategy: ShadowPod` explicitly to use ShadowPod with StatefulSet workloads.
+Set `migrationStrategy: ShadowPod` explicitly to override auto-detection for StatefulSet workloads (enables zero-downtime migration at the cost of temporary orphaning until re-adoption is implemented).
 
 ## Checkpoint Transfer Modes
 
