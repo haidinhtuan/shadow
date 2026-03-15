@@ -992,6 +992,10 @@ func (r *StatefulMigrationReconciler) handleSwapPrepare(ctx context.Context, m *
 
 	logger.Info("PrepareSwap complete, swap queue created")
 
+	// Take the patch base BEFORE modifying OriginalReplicas so the status
+	// patch below includes both OriginalReplicas and SwapSubPhase.
+	patch := client.MergeFrom(m.DeepCopy())
+
 	// Start STS scale-down early so it overlaps with re-checkpoint + transfer.
 	// This saves ~7-15s from the accumulation window (less time for messages
 	// to accumulate in the swap queue).
@@ -1019,13 +1023,51 @@ func (r *StatefulMigrationReconciler) handleSwapPrepare(ctx context.Context, m *
 				} else {
 					logger.Info("Started early STS scale-down in PrepareSwap",
 						"statefulset", m.Status.StatefulSetName, "targetNode", m.Spec.TargetNode)
+
+					// Force-delete the source pod immediately with 0s grace to
+					// avoid the STS controller's default 30s graceful termination.
+					// Remove Service labels first (traffic bridge) so traffic
+					// shifts to shadow pod before the pod disappears.
+					sourcePod := &corev1.Pod{}
+					if getErr := r.Get(ctx, types.NamespacedName{Name: m.Spec.SourcePod, Namespace: m.Namespace}, sourcePod); getErr == nil {
+						if sourcePod.Labels != nil {
+							podPatch := client.MergeFrom(sourcePod.DeepCopy())
+							changed := false
+							for k := range m.Status.SourcePodLabels {
+								if _, has := sourcePod.Labels[k]; has {
+									if k == "controller-revision-hash" ||
+										k == "statefulset.kubernetes.io/pod-name" ||
+										k == "apps.kubernetes.io/pod-index" {
+										continue
+									}
+									delete(sourcePod.Labels, k)
+									changed = true
+								}
+							}
+							if changed {
+								if labelErr := r.Patch(ctx, sourcePod, podPatch); labelErr != nil {
+									logger.Error(labelErr, "Failed to remove Service labels in PrepareSwap")
+								} else {
+									logger.Info("Removed Service labels from source pod in PrepareSwap", "pod", m.Spec.SourcePod)
+								}
+							}
+						}
+
+						gracePeriod := int64(0)
+						if delErr := r.Delete(ctx, sourcePod, &client.DeleteOptions{
+							GracePeriodSeconds: &gracePeriod,
+						}); delErr != nil && !errors.IsNotFound(delErr) {
+							logger.Error(delErr, "Failed to force-delete source pod in PrepareSwap")
+						} else {
+							logger.Info("Force-deleted source pod in PrepareSwap", "pod", m.Spec.SourcePod)
+						}
+					}
 				}
 			}
 		}
 	}
 
-	// Transition to ReCheckpoint
-	patch := client.MergeFrom(m.DeepCopy())
+	// Transition to ReCheckpoint (patch also persists OriginalReplicas set above)
 	m.Status.SwapSubPhase = "ReCheckpoint"
 	if err := r.Status().Patch(ctx, m, patch); err != nil {
 		return ctrl.Result{}, false, err
@@ -1335,7 +1377,7 @@ func (r *StatefulMigrationReconciler) handleSwapCreateReplacement(ctx context.Co
 		// Its state is already re-checkpointed, so graceful shutdown
 		// adds no value and the default 30s grace period dominates
 		// the identity swap duration.
-		gracePeriod := int64(1)
+		gracePeriod := int64(0)
 		if delErr := r.Delete(ctx, existing, &client.DeleteOptions{
 			GracePeriodSeconds: &gracePeriod,
 		}); delErr != nil && !errors.IsNotFound(delErr) {
@@ -1554,7 +1596,7 @@ func (r *StatefulMigrationReconciler) handleSwapTrafficSwitch(ctx context.Contex
 	// subsequent migration doesn't wait for the default 30s termination.
 	shadowPod := &corev1.Pod{}
 	if err := r.Get(ctx, types.NamespacedName{Name: m.Status.TargetPod, Namespace: m.Namespace}, shadowPod); err == nil {
-		gracePeriod := int64(1)
+		gracePeriod := int64(0)
 		if err := r.Delete(ctx, shadowPod, &client.DeleteOptions{
 			GracePeriodSeconds: &gracePeriod,
 		}); err != nil {
@@ -1918,7 +1960,7 @@ func (r *StatefulMigrationReconciler) handleSwapFenceCutover(ctx context.Context
 	// Step 1: Kill the shadow pod (it has fully drained primary)
 	shadowPod := &corev1.Pod{}
 	if err := r.Get(ctx, types.NamespacedName{Name: m.Status.TargetPod, Namespace: m.Namespace}, shadowPod); err == nil {
-		gracePeriod := int64(1)
+		gracePeriod := int64(0)
 		if err := r.Delete(ctx, shadowPod, &client.DeleteOptions{
 			GracePeriodSeconds: &gracePeriod,
 		}); err != nil && !errors.IsNotFound(err) {
