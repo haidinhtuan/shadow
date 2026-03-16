@@ -57,6 +57,10 @@ docs/
 
 # Claude Code
 CLAUDE.md
+.claude-memory/
+
+# Evaluation results (synced via rsync)
+eval/results/migration-metrics-*.csv
 
 # Temporary artifacts
 logs/
