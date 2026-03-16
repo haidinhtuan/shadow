@@ -1,2 +1,0 @@
-run,msg_rate,configuration,total_time_s,checkpoint_s,transfer_s,restore_s,replay_s,finalize_s,status
-1,10,deployment-registry,11.401s,383ms,197ms,3.467s,6.508s,846ms,Completed
