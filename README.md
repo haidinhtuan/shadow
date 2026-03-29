@@ -6,7 +6,7 @@
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.30+-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-SHADOW is a Kubernetes operator that performs live migration of stateful microservices between cluster nodes with zero downtime and zero message loss. It combines CRIU-based container checkpointing with message queue replay to preserve both in-memory execution state and in-flight message consistency.
+SHADOW is a Kubernetes operator that performs live migration of stateful microservices between cluster nodes with zero downtime and zero message loss. It combines CRIU (Checkpoint/Restore In Userspace)-based container checkpointing with message queue replay to preserve both in-memory execution state and in-flight message consistency.
 
 SHADOW builds on the MS2M (Message-based Stateful Microservice Migration) framework [[CIoT 2022]](https://ieeexplore.ieee.org/abstract/document/9766576), [[ICIN 2025]](https://ieeexplore.ieee.org/abstract/document/10942720) and introduces three contributions:
 
@@ -50,7 +50,7 @@ flowchart TB
 
 - **SHADOW Operator** -- Watches `StatefulMigration` custom resources and drives the phase-based state machine through each migration stage.
 - **Source Kubelet** -- Executes the CRIU checkpoint via the kubelet checkpoint API, proxied through the API server.
-- **Transfer Job** -- Ephemeral Job scheduled on the source node. Packages the checkpoint tarball as a single-layer OCI image. In Registry mode, pushes to a container registry. In Direct mode, POSTs to the ms2m-agent on the target node.
+- **Transfer Job** -- Ephemeral Job scheduled on the source node. Packages the checkpoint tarball as a single-layer OCI (Open Container Initiative) image. In Registry mode, pushes to a container registry. In Direct mode, POSTs to the ms2m-agent on the target node.
 - **ms2m-agent** -- DaemonSet on each node (Direct transfer mode). Receives checkpoint tarballs via HTTP, builds the OCI image locally, and loads it into CRI-O via `skopeo copy`.
 - **Target Kubelet** -- Pulls (or loads) the checkpoint image and restores the container on the target node.
 
@@ -168,7 +168,7 @@ kubectl describe statefulmigration migrate-consumer-0
 | **CRIU** | v4.0+ installed on all worker nodes |
 | **crun** | v1.21+ (required for re-checkpoint support; v1.19 and earlier have a [cgroup namespace root bug](https://github.com/containers/crun/issues/1651) that prevents re-checkpointing restored containers) |
 | **Container Registry** | Accessible from all nodes (Registry transfer mode) |
-| **Message Broker** | RabbitMQ (AMQP 0-9-1) |
+| **Message Broker** | RabbitMQ (AMQP 0-9-1 — Advanced Message Queuing Protocol) |
 | **Go** | v1.25+ (for building from source) |
 
 ## Development
@@ -240,7 +240,7 @@ Evaluated on a 3-node bare-metal Kubernetes cluster (dedicated servers from a Eu
 
 ![Total Migration Time](docs/images/total-migration-time.png)
 
-At low rates (10 msg/s), ShadowPod reduces migration time by **73--76%** (50.8s to 12.4--13.8s). SS-Swap adds ~2s for the Exchange-Fence identity swap (15.8s, 69% reduction). At high rates (>=100 msg/s), the 120s replay cutoff dominates, narrowing the gap to 14--22%. At the intermediate rate of 60 msg/s, the reduction reaches 77% (157.5s to 36.0s).
+At low rates (10 msg/s), ShadowPod reduces migration time by **73--76%** (50.8s to 12.4--13.8s). SS-ShadowPod-Swap adds ~2s for the Exchange-Fence identity swap (15.8s, 69% reduction). At high rates (>=100 msg/s), the 120s replay cutoff dominates, narrowing the gap to 14--22%. At the intermediate rate of 60 msg/s, the reduction reaches 77% (157.5s to 36.0s).
 
 ### Service Downtime
 
@@ -252,13 +252,13 @@ All three ShadowPod configurations achieve **zero measured downtime** across all
 
 ![Phase Breakdown at 60 msg/s](docs/images/phase-breakdown-60.png)
 
-The restore phase -- which dominates Sequential at 38.4s -- is reduced to ~2.9s with ShadowPod (92% reduction). SS-Swap's visible finalize overhead (14.7s) reflects the Exchange-Fence identity swap: re-checkpoint, replacement pod creation, parallel queue drain, and StatefulSet adoption. SS-Swap also shows near-zero transfer time (0.19s) due to the agent-assisted registry push, which avoids Kubernetes Job scheduling overhead.
+The restore phase -- which dominates Sequential at 38.4s -- is reduced to ~2.9s with ShadowPod (92% reduction). SS-ShadowPod-Swap's visible finalize overhead (14.7s) reflects the Exchange-Fence identity swap: re-checkpoint, replacement pod creation, parallel queue drain, and StatefulSet adoption. SS-ShadowPod-Swap also shows near-zero transfer time (0.19s) due to the agent-assisted registry push, which avoids Kubernetes Job scheduling overhead.
 
 ### Conclusions
 
-- **ShadowPod eliminates service downtime** for all three ShadowPod configurations. Zero downtime was confirmed across all 210 ShadowPod runs (SS-Shadow, SS-Swap, D-Reg).
+- **ShadowPod eliminates service downtime** for all three ShadowPod configurations. Zero downtime was confirmed across all 210 ShadowPod runs (SS-ShadowPod, SS-ShadowPod-Swap, D-Registry).
 - **Restore phase reduction of 92%** (38.5s to 2.9s) by creating an independent shadow pod instead of waiting for the StatefulSet scale-down/up cycle.
-- **Exchange-Fence trades speed for correctness.** SS-Swap adds 8.6--14.7s finalize overhead but restores full StatefulSet ownership of the migrated workload with zero message loss during the handoff. The net effect is a modest increase in total time (15.8s vs 13.8s at 10 msg/s), with the overhead diminishing at high rates where replay dominates.
+- **Exchange-Fence trades speed for correctness.** SS-ShadowPod-Swap adds 8.6--14.7s finalize overhead but restores full StatefulSet ownership of the migrated workload with zero message loss during the handoff. The net effect is a modest increase in total time (15.8s vs 13.8s at 10 msg/s), with the overhead diminishing at high rates where replay dominates.
 - **Replay is the remaining bottleneck** at high message rates. When the incoming rate exceeds the consumer's processing capacity (~50 msg/s), the replay cutoff fires and total migration time converges across all strategies.
 - **Zero message loss** was maintained across all 280 runs, confirming the correctness of the MS2M message replay mechanism across all four configurations.
 
