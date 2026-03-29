@@ -2,8 +2,10 @@
 
 **Seamless Handoff And Zero-Downtime Orchestrated Workload Migration for Stateful Microservices**
 
+[![CI](https://github.com/haidinhtuan/shadow/actions/workflows/ci.yml/badge.svg)](https://github.com/haidinhtuan/shadow/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.30+-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
+[![arXiv](https://img.shields.io/badge/arXiv-2603.25484-b31b1b.svg)](https://arxiv.org/abs/2603.25484)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 SHADOW is a Kubernetes operator that performs live migration of stateful microservices between cluster nodes with zero downtime and zero message loss. It combines CRIU (Checkpoint/Restore In Userspace)-based container checkpointing with message queue replay to preserve both in-memory execution state and in-flight message consistency.
@@ -208,9 +210,11 @@ config/
   rbac/                                ClusterRole
   manager/                             Operator Deployment manifest
   daemonset/                           ms2m-agent DaemonSet + Service
+manifests/                             Standalone deployment manifests (RBAC, ServiceAccount)
+terraform/                             GKE/bare-metal cluster provisioning
 eval/
   results/                             Evaluation CSV data (280 runs, 4 configs)
-  workloads/                           Consumer workload manifests
+  workloads/                           Consumer workload manifests (StatefulSet + Deployment)
   scripts/                             Evaluation and downtime measurement scripts
 ```
 
