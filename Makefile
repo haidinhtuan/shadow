@@ -35,7 +35,7 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: fmt vet ## Run tests.
-	go test ./... -coverprofile cover.out
+	go test ./... -coverprofile cover.out -race
 
 ##@ Build
 
