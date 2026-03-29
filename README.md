@@ -220,7 +220,17 @@ eval/
 
 ## Evaluation Results
 
-Evaluated on a 3-node bare-metal Kubernetes cluster (dedicated servers from a European cloud provider, 4 vCPUs / 8 GB RAM per node, CRI-O + CRIU v4.0). Four configurations across seven message rates (10--120 msg/s), 10 repetitions each, totaling **280 migration runs**.
+Evaluated on a 3-node bare-metal Kubernetes cluster (dedicated servers from a European cloud provider, 4 vCPUs / 8 GB RAM / 80 GB SSD per node). Four configurations across seven message rates (10--120 msg/s), 10 repetitions each, totaling **280 migration runs**.
+
+| Component | Version |
+|:----------|:--------|
+| Ubuntu | 22.04 LTS |
+| Kubernetes | v1.32 |
+| CRI-O | v1.32 |
+| CRIU | v4.0 (compiled from source) |
+| crun | v1.21+ (with [cgroup root patch](https://github.com/containers/crun/issues/1651)) |
+| RabbitMQ | 3.13 |
+| Go (operator) | 1.25 |
 
 | Config | Workload | Strategy | Identity Swap |
 |:-------|:---------|:---------|:-------------|
