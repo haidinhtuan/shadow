@@ -61,6 +61,9 @@ CLAUDE.md
 .claude-memory/
 
 
+# Overleaf sync (separate git repo)
+overleaf_sync/
+
 # Temporary artifacts
 logs/
 temp-images/
