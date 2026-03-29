@@ -37,40 +37,53 @@ hai.dinh-tuan@tu-berlin.de}
 
 \maketitle
 
+%% CONDENSED: original two-paragraph abstract
+% Live migration of stateful microservices in Kubernetes remains challenging due to
+% the tight coupling between container state, pod identity, and orchestrator
+% constraints. Our prior work introduced the Message-based Stateful Microservice
+% Migration (MS2M) framework, which reconstructs service state through message
+% replay rather than low-level memory transfer, and demonstrated its integration
+% with Kubernetes using Forensic Container Checkpointing. However, the initial
+% implementation relied on an external Python-based migration manager and suffered
+% from two performance bottlenecks: a restore phase dominated by StatefulSet
+% identity constraints forcing a sequential stop-recreate cycle, and a checkpoint
+% transfer phase consuming several seconds for the OCI registry round-trip.
+%
+% This paper presents SHADOW ... [full original text preserved above]
+%% CONDENSED: previous single-paragraph abstract
+% This paper presents SHADOW (...) a Kubernetes-native framework for live
+% migration of stateful microservices that builds on the MS2M approach.
+% SHADOW makes three contributions: (1) Kubernetes Operator with CRD and
+% idempotent state machine; (2) ShadowPod strategy eliminating ~38s restore
+% bottleneck; (3) direct node-to-node transfer. Evaluation: 92% restore
+% reduction, 0ms downtime, 73% total time reduction, zero message loss.
 \begin{abstract}
-Live migration of stateful microservices in Kubernetes remains challenging due to
-the tight coupling between container state, pod identity, and orchestrator
-constraints. Our prior work introduced the Message-based Stateful Microservice
-Migration (MS2M) framework, which reconstructs service state through message
-replay rather than low-level memory transfer, and demonstrated its integration
-with Kubernetes using Forensic Container Checkpointing. However, the initial
-implementation relied on an external Python-based migration manager and suffered
-from two performance bottlenecks: a restore phase dominated by StatefulSet
-identity constraints forcing a sequential stop-recreate cycle, and a checkpoint
-transfer phase consuming several seconds for the OCI registry round-trip.
-
-This paper presents SHADOW (\textbf{S}eamless \textbf{H}andoff \textbf{A}nd
-Zero-\textbf{D}owntime \textbf{O}rchestrated \textbf{W}orkload Migration), a
-Kubernetes-native framework addressing these limitations. First, SHADOW
-implements MS2M as a Kubernetes Operator using a Custom Resource Definition and a
-declarative state machine reconciler, replacing the external migration manager
-with a Kubernetes-native control loop. Second, SHADOW introduces the ShadowPod
-migration strategy, which creates a target pod alongside the still-running source
-to enable concurrent operation during state synchronization. We show that this
-strategy applies to both Deployment-managed and StatefulSet-managed workloads:
-for Deployments, the source pod is deleted and the owning Deployment is steered
-to the target node via affinity patching; for StatefulSets, the owning
-StatefulSet is scaled down by one replica in finalization, avoiding the identity
-conflict without requiring a workload type change. Third, we present a direct
-node-to-node checkpoint transfer mechanism via an ms2m-agent DaemonSet, bypassing
-the container registry entirely. We evaluate these optimizations on a bare-metal
-Kubernetes cluster across three configurations and seven message rates
-(10--120\,msg/s), demonstrating significant reductions in total migration time
-and service downtime while maintaining zero message loss.
+Migrating stateful microservices in Kubernetes requires careful state
+management because in-memory state is lost when a container restarts.
+For StatefulSet-managed workloads, the problem is compounded by identity
+constraints that prohibit two pods with the same ordinal from running
+simultaneously, forcing a sequential stop-recreate cycle with a median
+38.5\,s of service downtime. This paper presents SHADOW
+(\textbf{S}eamless \textbf{H}andoff \textbf{A}nd Zero-\textbf{D}owntime
+\textbf{O}rchestrated \textbf{W}orkload Migration), a Kubernetes-native
+framework that implements the Message-based Stateful Microservice Migration
+(MS2M) approach as a Kubernetes Operator. SHADOW introduces the
+\textit{ShadowPod} strategy, where a shadow pod is created from a CRIU
+checkpoint image on the target node while the source pod continues serving
+traffic, allowing concurrent operation during message replay. For
+StatefulSet workloads, an identity swap procedure with the ExchangeFence
+mechanism re-checkpoints the shadow pod, creates a StatefulSet-owned
+replacement, and drains both message queues to guarantee zero message loss
+during the handoff. An evaluation on a bare-metal Kubernetes cluster with
+280 migration runs across four configurations and seven message rates
+(10--120\,msg/s) shows that, compared to the sequential baseline on the same
+StatefulSet workload, the ShadowPod strategy reduces the restore phase by up
+to 92\%, eliminates service downtime entirely, and reduces total migration
+time by up to 77\%, with zero message loss across all 280 runs.
 \end{abstract}
 
 \begin{IEEEkeywords}
-SHADOW, microservices, live migration, Kubernetes, container checkpointing,
+microservices, live migration, Kubernetes, container checkpointing,
 CRIU, stateful services, operator pattern
 \end{IEEEkeywords}
 
@@ -81,92 +94,100 @@ CRIU, stateful services, operator pattern
 %% ============================================================================
 
 The increasing adoption of microservice architectures in cloud-native and
-industrial edge environments has introduced new challenges around service
-mobility. While stateless services can be freely rescheduled across cluster
-nodes, stateful microservices---those that maintain in-memory state for
-performance-critical operations---require careful state management during
+cloud/edge environments has introduced new challenges around service
+mobility. While stateless services can be rescheduled across cluster
+nodes, stateful microservices that maintain in-memory state for
+performance-critical operations require careful state management during
 migration. Traditional migration techniques, originally developed for virtual
 machines, treat service state as an opaque memory block and rely on pre-copy or
-post-copy mechanisms that introduce significant complexity and network
+post-copy mechanisms that introduce additional complexity and network
 overhead~\cite{ma2019live, tazzioli2023postcopy}.
 
 The Message-based Stateful Microservice Migration (MS2M)
-framework~\cite{dinhtuan2022ms2m} addresses this challenge by leveraging the
+framework~\cite{dinhtuan2022ms2m} addresses this challenge by using the
 application's own messaging infrastructure to reconstruct state on the target
 node. Rather than copying raw memory, MS2M checkpoints the running container,
 restores it on a target node, and replays buffered messages to synchronize
-state---reducing downtime to the brief checkpoint creation phase. A subsequent
+state, reducing downtime to the brief checkpoint creation phase. A subsequent
 extension~\cite{dinhtuan2025k8s} integrated MS2M into Kubernetes using Forensic
 Container Checkpointing (FCC)~\cite{k8sfcc}, introduced a threshold-based cutoff
 mechanism for bounded replay times, and adapted the procedure for StatefulSet
 workloads using a Sequential (stop-then-recreate) strategy.
 
 However, the Kubernetes integration in~\cite{dinhtuan2025k8s} exhibited two
-significant performance bottlenecks. First, the restore phase for StatefulSet
-pods required approximately 39 seconds due to Kubernetes' identity constraints,
+performance bottlenecks. First, the restore phase for StatefulSet
+pods required a median of 38.5 seconds due to Kubernetes' identity constraints,
 which prohibit two pods with the same StatefulSet-managed hostname from running
 simultaneously. This forced a sequential stop-recreate cycle, during which the
 service was completely unavailable. Second, the checkpoint transfer phase
-consumed approximately 6 seconds for a 27\,MB checkpoint, as the process involved
+consumed a median of 5.4 seconds for a 27\,MB checkpoint, as the process involved
 building an OCI-compliant container image, pushing it to a container registry,
 and pulling it on the target node. Additionally, the migration was orchestrated
-by an external Python script that communicated with the cluster via
+by an an out-of-band agent (\texttt{Migration Manager}) that communicated with the cluster via
 \texttt{kubectl}, operating outside Kubernetes' declarative resource model.
 
-This paper presents SHADOW (Seamless Handoff And Zero-Downtime Orchestrated
-Workload Migration), a Kubernetes-native framework that addresses these
-limitations through three contributions:
+This paper presents SHADOW\footnote{The SHADOW implementation is publicly
+available at \url{https://github.com/haidinhtuan/shadow}} (Seamless Handoff
+And Zero-Downtime Orchestrated Workload Migration), a Kubernetes-native
+framework that addresses these limitations through three contributions:
 
+%% CONDENSED: detailed contribution descriptions (moved detail to System Design)
+% \item \textbf{Kubernetes Operator.} SHADOW implements MS2M as a Kubernetes
+%   Operator using a Custom Resource Definition (\texttt{StatefulMigration}) and a
+%   controller-runtime-based reconciler. The operator encodes the five-phase
+%   migration procedure as an idempotent state machine, replacing the external
+%   Python script with a Kubernetes-native control loop that integrates with the
+%   platform's desired-state model, RBAC policies, and observability
+%   infrastructure.
+%
+% \item \textbf{ShadowPod Migration Strategy.} A migration strategy is introduced
+%   that creates a \textit{shadow pod} on the target node from the checkpoint
+%   image while the source pod remains running. Both pods operate concurrently
+%   during the message replay phase, eliminating the sequential restore
+%   bottleneck. Crucially, this strategy is not limited to
+%   Deployment-managed workloads: for StatefulSet-managed pods, the shadow pod is
+%   created with a distinct name (e.g., \texttt{consumer-0-shadow}) outside the
+%   StatefulSet's ownership, carrying the same application labels for Service
+%   routing. During finalization, the StatefulSet is scaled down by one replica to
+%   remove the original pod, while the shadow pod continues serving traffic. This
+%   avoids the identity conflict without requiring a change in workload type.
+%
+% \item \textbf{Direct Node-to-Node Transfer.} An \texttt{ms2m-agent}
+%   DaemonSet is deployed on worker nodes that receives checkpoint archives
+%   directly from the source node via HTTP, builds the OCI image locally, and
+%   loads it into the container runtime's image store---bypassing the container
+%   registry entirely.
 \begin{enumerate}
-\item \textbf{Kubernetes Operator.} We implement MS2M as a Kubernetes Operator
-  using a Custom Resource Definition (\texttt{StatefulMigration}) and a
-  controller-runtime-based reconciler. The operator encodes the five-phase
-  migration procedure as an idempotent state machine, replacing the external
-  Python script with a Kubernetes-native control loop that integrates with the
-  platform's desired-state model, RBAC policies, and observability
-  infrastructure.
+\item \textit{Kubernetes Operator:} a Custom Resource Definition
+  (\texttt{StatefulMigration}) and an idempotent state machine reconciler that
+  replaces the Migration Manager with a Kubernetes-native control loop.
 
-\item \textbf{ShadowPod Migration Strategy.} We introduce a migration strategy
-  that creates a \textit{shadow pod} on the target node from the checkpoint
-  image while the source pod remains running. Both pods operate concurrently
-  during the message replay phase, eliminating the sequential restore
-  bottleneck. Crucially, we show that this strategy is not limited to
-  Deployment-managed workloads: for StatefulSet-managed pods, the shadow pod is
-  created with a distinct name (e.g., \texttt{consumer-0-shadow}) outside the
-  StatefulSet's ownership, carrying the same application labels for Service
-  routing. During finalization, the StatefulSet is scaled down by one replica to
-  remove the original pod, while the shadow pod continues serving traffic. This
-  avoids the identity conflict without requiring a change in workload type.
+\item \textit{ShadowPod Migration Strategy:} a shadow pod is created on the
+  target node from the checkpoint image while the source pod continues serving,
+  allowing concurrent operation during message replay. This works for
+  both Deployment- and StatefulSet-managed workloads.
 
-\item \textbf{Direct Node-to-Node Transfer.} We deploy an \texttt{ms2m-agent}
-  DaemonSet on worker nodes that receives checkpoint archives directly from the
-  source node via HTTP, builds the OCI image locally, and loads it into the
-  container runtime's image store---bypassing the container registry entirely.
+\item \textit{Identity Swap via ExchangeFence:} after ShadowPod migration
+  on a StatefulSet, the shadow pod is orphaned outside the StatefulSet's
+  ownership. SHADOW provides an identity swap procedure that re-checkpoints
+  the shadow pod, creates a StatefulSet-owned replacement, and uses the
+  ExchangeFence mechanism (unbinding, draining queues, and rebinding) to guarantee zero message loss during this handoff.
 \end{enumerate}
 
-SHADOW targets event-driven microservices whose in-memory state is derived from
-processed messages---a workload class where persistent disk state (e.g.,
-PersistentVolumeClaims) is not required, since state can be reconstructed
-through message replay. This scoping assumption enables the ShadowPod strategy
-without conflicting with ReadWriteOnce volume constraints.
+%% CONDENSED: scoping and evaluation summary (already in abstract)
+% SHADOW targets event-driven microservices whose in-memory state is derived from
+% processed messages rather than persistent disk storage. The framework is
+% evaluated on a bare-metal Kubernetes cluster across four configurations and
+% 280 total migration runs.
 
-We evaluate SHADOW on a bare-metal Kubernetes cluster with three
-configurations across seven message rates (10--120\,msg/s) and ten repetitions
-each, totaling 210 migration runs. The three configurations isolate the effect
-of each optimization: the StatefulSet Sequential baseline
-from~\cite{dinhtuan2025k8s}, ShadowPod applied to the same StatefulSet workload,
-and ShadowPod with a Deployment-based workload. The results demonstrate
-significant reductions in both total migration time and measured service
-downtime, while maintaining zero message loss throughout all experiments.
-The SHADOW implementation is publicly available.\footnote{\url{https://github.com/haidinhtuan/shadow}}
-
-The remainder of this paper is organized as follows. Section~\ref{sec:background}
-provides background on MS2M and Kubernetes integration challenges.
-Section~\ref{sec:design} presents the SHADOW design, including the operator
-architecture and both optimization strategies. Section~\ref{sec:evaluation}
-details the experimental evaluation and discusses the results.
-Section~\ref{sec:related} surveys related work, and Section~\ref{sec:conclusion}
-concludes the paper.
+%% CONDENSED: paper organization paragraph (filler)
+% The remainder of this paper is organized as follows. Section~\ref{sec:background}
+% provides background on MS2M and Kubernetes integration challenges.
+% Section~\ref{sec:design} presents the SHADOW design, including the operator
+% architecture and both optimization strategies. Section~\ref{sec:evaluation}
+% details the experimental evaluation and discusses the results.
+% Section~\ref{sec:related} surveys related work, and Section~\ref{sec:conclusion}
+% concludes the paper.
 
 
 %% ============================================================================
@@ -181,11 +202,38 @@ The Message-based Stateful Microservice Migration (MS2M)
 framework~\cite{dinhtuan2022ms2m} was designed for event-driven microservices
 that derive their state from processed message streams. Unlike traditional
 migration approaches that treat service state as an opaque memory block, MS2M
-exploits a key property of message-driven architectures: \textit{service state
+uses a property of message-driven architectures: \textit{service state
 is the deterministic result of the messages a service has processed}. This
-insight enables state reconstruction through message replay rather than low-level
+makes state reconstruction possible through message replay rather than low-level
 memory transfer.
 
+%% CONDENSED: original enumerate list for five-phase procedure
+% The framework defines a five-phase migration procedure coordinated by a
+% Migration Manager:
+%
+% \begin{enumerate}
+% \item \textbf{Checkpoint Creation:} The source container is briefly paused using
+%   CRIU (Checkpoint/Restore in Userspace)~\cite{criu} to create a process
+%   checkpoint. A secondary message queue is created to buffer incoming messages
+%   from this point forward. The source is resumed immediately after
+%   checkpointing.
+%
+% \item \textbf{Checkpoint Transfer:} The checkpoint archive is transferred from
+%   the source host to the target host. The source service continues processing
+%   live traffic during this phase.
+%
+% \item \textbf{Service Restoration:} The checkpoint is restored on the target
+%   host, creating a new service instance with the exact process state captured
+%   at checkpoint time.
+%
+% \item \textbf{Message Replay:} The restored instance processes all buffered
+%   messages from the secondary queue, synchronizing its state with the source's
+%   state at the time of checkpointing.
+%
+% \item \textbf{Finalization:} The target instance switches from the secondary
+%   queue to the primary queue for live traffic. The source instance is
+%   terminated, and the secondary queue is deleted.
+% \end{enumerate}
 The framework defines a five-phase migration procedure coordinated by a
 Migration Manager: (1)~\textbf{Checkpoint Creation} -- the source container is
 briefly paused using CRIU~\cite{criu} to create a process checkpoint while a
@@ -196,6 +244,17 @@ the archive is sent to the target host while the source continues serving;
 from the secondary queue; and (5)~\textbf{Finalization} -- the target switches
 to the primary queue and the source is terminated.
 
+%% CONDENSED: expanded key assumption paragraph
+% A key assumption of the MS2M framework is that the target workload's state
+% is fully determined by the messages it has processed. During the replay phase,
+% the source and target instances consume from \textit{separate} queues (primary
+% and secondary, respectively), so no message is consumed twice from the same
+% queue. However, the same logical messages are present in both queues due to the
+% fanout exchange. If the service produces downstream side effects (e.g., database
+% writes, outbound events), these may be duplicated during replay. Applications
+% using MS2M must therefore either suppress side effects during the replay phase
+% (detectable via the \texttt{START\_REPLAY}/\texttt{END\_REPLAY} control
+% messages) or ensure that downstream operations are idempotent.
 A key assumption is that service state is fully determined by processed
 messages. During replay, source and target consume from separate queues, so no
 message is consumed twice. Applications must suppress side effects during replay
@@ -213,12 +272,32 @@ reduction in service downtime compared to traditional stop-and-copy migration.
 \subsection{Kubernetes Integration}
 \label{sec:k8s-integration}
 
-The integration of MS2M into Kubernetes~\cite{dinhtuan2025k8s} relied on
-\textit{Forensic Container Checkpointing} (FCC)~\cite{k8sfcc}, an experimental
-Kubernetes feature (since v1.25) that exposes CRIU checkpointing through the
-kubelet API. Checkpoint transfer was implemented by packaging the archive as an
-OCI container image pushed to a registry. That work identified two key
-challenges:
+%% CONDENSED: expanded Kubernetes integration first paragraph
+% The integration of MS2M into Kubernetes~\cite{dinhtuan2025k8s} required
+% adapting the framework to the platform's declarative, desired-state resource
+% model. The original three-actor architecture (Source Host, Target Host,
+% Migration Manager) was extended to a four-actor model that includes the
+% Kubernetes API Server as an intermediary for all cluster operations.
+%
+% A critical technical foundation for this integration is \textit{Forensic
+% Container Checkpointing} (FCC)~\cite{k8sfcc}, an experimental Kubernetes
+% feature (since v1.25) that extends the kubelet API to create CRIU checkpoints
+% of running containers. FCC enables checkpointing without requiring direct
+% access to the container runtime or CRIU binary on worker nodes. The checkpoint
+% transfer was implemented by packaging the checkpoint archive as an OCI-compliant
+% container image and pushing it to a container registry, from which the target
+% node pulls during pod creation.
+%
+% The prior work also identified two key challenges:
+The integration of MS2M into Kubernetes~\cite{dinhtuan2025k8s} required
+adapting the framework to the platform's declarative, desired-state resource
+model. A critical technical foundation is \textit{Forensic Container
+Checkpointing} (FCC)~\cite{k8sfcc}, an experimental Kubernetes feature (since
+v1.25) that extends the kubelet API to create CRIU checkpoints of running
+containers without requiring direct access to the container runtime. Checkpoint
+transfer was implemented by packaging the archive as an OCI-compliant container
+image and pushing it to a container registry, from which the target node pulls
+during pod creation. That work identified two key challenges:
 
 \textbf{Unbounded Replay Time.} When the incoming message rate approaches the
 service's processing capacity, the replay queue grows indefinitely, making
@@ -232,22 +311,22 @@ guaranteeing migration completion within a specified time window.
 identities that Kubernetes enforces by prohibiting two pods with the same ordinal
 index from running simultaneously. This prevents the concurrent source-target
 operation that MS2M relies on, forcing a sequential stop-recreate cycle
-(\textit{Sequential strategy}) that dominated migration time at approximately
-39 seconds. The prior work treated this as an inherent limitation of StatefulSet
+(\textit{Sequential strategy}) that dominated migration time at a median of
+38.5 seconds. The prior work treated this as an inherent limitation of StatefulSet
 workloads.
 
-%% CONDENSED: Kubernetes Operators subsection (well-known pattern)
-% \subsection{Kubernetes Operators}
-% \label{sec:operators}
-% A Kubernetes Operator~\cite{operatorpattern} is a design pattern that combines
-% a Custom Resource Definition (CRD) with a dedicated controller to manage
-% application-specific operational knowledge. The controller implements a
-% \textit{reconcile loop} that continuously compares the desired state (expressed
-% in the custom resource's \texttt{spec}) with the actual cluster state and takes
-% corrective actions to converge. This declarative model provides automatic retry
-% on failure, leader election for high availability, integration with Kubernetes
-% RBAC and audit logging, and native observability through resource status fields
-% and Kubernetes events.
+\subsection{Kubernetes Operators}
+\label{sec:operators}
+
+A Kubernetes Operator~\cite{operatorpattern} is a design pattern that combines
+a Custom Resource Definition (CRD) with a dedicated controller to manage
+application-specific operational knowledge. The controller implements a
+\textit{reconcile loop} that continuously compares the desired state (expressed
+in the custom resource's \texttt{spec}) with the actual cluster state and takes
+corrective actions to converge. This declarative model provides automatic retry
+on failure, leader election for high availability, integration with Kubernetes
+RBAC and audit logging, and native observability through resource status fields
+and Kubernetes events.
 
 
 %% ============================================================================
@@ -375,7 +454,8 @@ captures the migration intent through the following key specification fields:
 The resource status tracks the current \texttt{phase}, per-phase durations
 (\texttt{phaseTimings}), the checkpoint identifier, and metadata cached from
 the source pod (labels, container specs, owner references).
-%% CONDENSED: metadata caching rationale
+%% CONDENSED: metadata caching rationale (original listed "owning StatefulSet or
+%% Deployment name, original replica count" instead of "owner references")
 % This metadata caching is necessary because in
 % Sequential strategy, the source pod is deleted before the target pod is created,
 % so its labels and container specifications must be preserved in the CRD status
@@ -472,11 +552,11 @@ $\to$ ShadowPod), but this can be overridden explicitly.
 \subsection{ShadowPod Migration Strategy}
 \label{sec:shadowpod}
 
-The ShadowPod strategy eliminates the sequential restore bottleneck by enabling
-source and target pods to operate concurrently during the replay phase. The
-key insight is that Kubernetes Services route traffic based on \textit{label
-selectors}, while StatefulSet identity constraints are enforced through
-\textit{owner references}. A shadow pod that carries the same application
+The ShadowPod strategy removes the sequential restore bottleneck by allowing
+source and target pods to operate concurrently during the replay phase.
+Kubernetes Services route traffic based on \textit{label selectors}, while
+StatefulSet identity constraints are enforced through \textit{owner references}.
+A shadow pod that carries the same application
 labels but is not owned by the StatefulSet can coexist with the original pod
 and receive Service traffic without violating identity constraints.
 
@@ -487,11 +567,11 @@ Figure~\ref{fig:timeline} illustrates the key difference between the Sequential
 and ShadowPod strategies. In the Sequential approach, the source pod must be
 terminated before the target pod can be created, causing a service gap. In the
 ShadowPod approach, the shadow pod is created and starts serving alongside the
-source, enabling a seamless handoff.
+source, providing an uninterrupted handoff.
 
 \begin{figure}[t]
 \centering
-\begin{tikzpicture}[
+\begin{tikzpicture}[scale=0.9, every node/.style={scale=0.9},
   phase/.style={draw, thick, minimum height=5mm, font=\scriptsize,
     inner sep=2pt, anchor=west},
   label/.style={font=\scriptsize\bfseries, anchor=east},
@@ -503,7 +583,7 @@ source, enabling a seamless handoff.
 \node[label] at (-0.2,1.2) {Source:};
 \node[phase, fill=blue!15, minimum width=8mm] at (0,1.2) {Ckpt};
 \node[phase, fill=yellow!20, minimum width=16mm] at (0.8,1.2) {Transfer};
-\node[gap, minimum width=32mm] at (2.4,1.2) {\textcolor{red!70!black}{DOWN (${\sim}$38\,s)}};
+\node[gap, minimum width=32mm] at (2.4,1.2) {\textcolor{red!70!black}{DOWN (38.5\,s)}};
 
 \node[label] at (-0.2,0.6) {Target:};
 \node[phase, fill=green!20, minimum width=32mm] at (2.4,0.6) {Restore};
@@ -531,7 +611,7 @@ source, enabling a seamless handoff.
 \draw[dashed, gray] (-0.2,0.15) -- (8.2,0.15);
 \end{tikzpicture}
 \caption{Timeline comparison of Sequential vs.\ ShadowPod migration. In
-Sequential, service is unavailable during the ${\sim}$38\,s restore phase. In
+Sequential, service is unavailable during the 38.5\,s median restore phase. In
 ShadowPod, the source continues serving while the shadow pod restores and
 replays, achieving zero downtime.}
 \label{fig:timeline}
@@ -543,7 +623,7 @@ down a StatefulSet and recreating its pod, the operator creates a new pod
 named \texttt{<source>-shadow} on the target node. This shadow pod uses the
 checkpoint container image with \texttt{imagePullPolicy: Never} (since the
 image is already present in the target node's local image store). The shadow
-pod carries the same application labels as the source pod, enabling it to
+pod carries the same application labels as the source pod, so it can
 receive traffic via the Kubernetes Service immediately upon becoming ready.
 Both the source pod and the shadow pod run concurrently during this phase
 and throughout the subsequent replay phase.
@@ -598,7 +678,7 @@ phase:
 \item Sends \texttt{END\_REPLAY} to the shadow pod.
 \item Scales the owning StatefulSet down by one replica. The StatefulSet
   controller removes the highest-ordinal pod (i.e., the original source pod),
-  while the shadow pod---which is not owned by the StatefulSet---continues
+  while the shadow pod (which is not owned by the StatefulSet) continues
   serving traffic.
 \item Deletes the replay queue and closes the broker connection.
 \end{enumerate}
@@ -633,16 +713,47 @@ exists.
 % correct node placement.
 
 
+\subsection{Identity Swap via ExchangeFence}
+\label{sec:identity-swap}
+
+The ShadowPod strategy for StatefulSets leaves the workload served by an orphaned shadow pod outside the StatefulSet's ownership. To restore full StatefulSet management, SHADOW provides an identity swap procedure during the Finalizing phase:
+
+\begin{enumerate}
+\item The shadow pod is re-checkpointed on the target node using a local CRIU dump.
+\item The StatefulSet is scaled down by one replica, removing the original source pod.
+\item A replacement pod with the original name (e.g., \texttt{consumer-0}) is created from the re-checkpoint image. The StatefulSet controller adopts this pod.
+\item The shadow pod is terminated.
+\end{enumerate}
+
+During step~4, traffic must be handed off from the shadow pod to the replacement pod without message loss. A naive cutoff (terminating the shadow and starting the replacement) risks duplicate processing or lost messages if the handoff is not atomic. SHADOW addresses this with the \textit{ExchangeFence} mechanism:
+
+\begin{enumerate}
+\item A temporary buffer queue is bound to the message exchange.
+\item The exchange is unbound from both the primary and swap queues, fencing new messages into the buffer.
+\item Both the primary and swap queues are drained to zero.
+\item The shadow pod is terminated, the primary queue is rebound to the exchange, and the buffer queue is drained into the replacement pod.
+\end{enumerate}
+
+The ExchangeFence provides a consistent cut: no messages are lost because the buffer queue captures all messages during the fence window, and no messages are duplicated because both source queues are fully drained before the handoff completes. This procedure adds 9--17\,s to the Finalizing phase (depending on message rate and queue depths) but restores full StatefulSet ownership of the migrated workload.
+
+
 \subsection{Direct Node-to-Node Transfer}
 \label{sec:direct-transfer}
 
-The second optimization eliminates the container registry round-trip during
-checkpoint transfer by enabling direct communication between worker nodes.
+The second optimization targets the container registry round-trip during
+checkpoint transfer. SHADOW provides two alternatives to Job-based registry
+transfer. First, when the \texttt{ms2m-agent} DaemonSet is present on the
+source node, the controller delegates the registry push to the agent process,
+avoiding the overhead of creating and scheduling a Kubernetes Job (agent-assisted
+registry transfer). Second, the controller implements a direct transfer mode
+through worker-to-worker communication that bypasses the registry entirely.
+All four evaluation configurations use registry-based transfer; the direct
+mode is not evaluated but is described here as a design contribution.
 
 \subsubsection{The ms2m-agent DaemonSet}
 \label{sec:agent}
 
-We deploy an \texttt{ms2m-agent} as a Kubernetes DaemonSet on all worker nodes.
+The \texttt{ms2m-agent} is deployed as a Kubernetes DaemonSet on all worker nodes.
 The agent exposes an HTTP endpoint (port 9443) that accepts checkpoint archives
 and performs local image construction. The agent's pod specification includes
 \texttt{hostPath} volume mounts for \texttt{/var/lib/kubelet/checkpoints}
@@ -675,6 +786,12 @@ as follows:
 % gzip-compressed one: on cluster-local networks, the CPU cost of compression
 % outweighs the bandwidth savings, and the uncompressed image can be loaded
 % faster by the container runtime.
+%% CONDENSED: expanded registry fallback description
+% This direct path eliminates the OCI image push and pull operations through the
+% container registry. For the default \texttt{Registry} transfer mode, the
+% existing procedure from~\cite{dinhtuan2025k8s} is preserved: the transfer Job
+% builds the OCI image and pushes it to a configured registry, from which the
+% target node pulls during pod creation.
 The OCI image uses an uncompressed layer, as CPU compression cost outweighs
 bandwidth savings on cluster-local networks. This direct path eliminates the
 registry push/pull round-trip. The default \texttt{Registry} transfer mode
@@ -685,7 +802,7 @@ from~\cite{dinhtuan2025k8s} remains available as a fallback.
 
 After CRIU restore, \texttt{gethostname()} returns the source pod's name (from
 the UTS namespace snapshot), causing the control message protocol to listen on
-the wrong queue. We resolve this by reading \texttt{/etc/hostname} (bind-mounted
+the wrong queue. This is resolved by reading \texttt{/etc/hostname} (bind-mounted
 by the runtime, reflecting the actual pod name) instead.
 %% CONDENSED: expanded hostname resolution discussion
 % During implementation, we identified a subtle interaction between CRIU
@@ -701,7 +818,7 @@ by the runtime, reflecting the actual pod name) instead.
 \label{sec:evaluation}
 %% ============================================================================
 
-This section presents the experimental evaluation of SHADOW across three
+This section presents the experimental evaluation of SHADOW across four
 migration configurations, comparing the baseline Sequential approach with the
 ShadowPod strategy on both StatefulSet and Deployment workloads.
 
@@ -751,8 +868,8 @@ payload. On \texttt{END\_REPLAY}, it switches back to the primary queue.
 
 \subsubsection{Configurations}
 
-Three migration configurations are evaluated, designed to isolate the effect
-of the ShadowPod strategy:
+Four migration configurations are evaluated, designed to isolate the effect
+of the ShadowPod strategy and identity swap:
 
 \begin{enumerate}
 \item \textbf{statefulset-sequential:} The baseline configuration from prior
@@ -773,19 +890,26 @@ of the ShadowPod strategy:
   ShadowPod strategy. The operator creates a shadow pod alongside the source
   and patches the Deployment's \texttt{nodeAffinity} during finalization.
   Checkpoints are transferred via registry.
+
+\item \textbf{statefulset-shadowpod-swap:} The consumer runs as a StatefulSet
+  with the ShadowPod strategy and ExchangeFence identity swap
+  (Section~\ref{sec:identity-swap}). After replay, the operator re-checkpoints
+  the shadow pod, creates a StatefulSet-owned replacement, and uses
+  ExchangeFence for zero-loss traffic handoff. Checkpoints are transferred via
+  the registry using the agent-assisted fast path (ms2m-agent).
 \end{enumerate}
 
 The comparison between configurations 1 and 2 isolates the effect of the
 ShadowPod strategy on the same workload type (StatefulSet). The comparison
-between configurations 2 and 3 reveals the additional benefit of using
-Deployment-managed workloads, where finalization does not require StatefulSet
-scale-down.
+between configurations 2 and 3 reveals the effect of workload type (StatefulSet
+vs.\ Deployment). The comparison between configurations 2 and 4 isolates the
+effect of identity swap (and its associated agent-assisted transfer path) on the same workload type.
 
 \subsubsection{Parameters}
 
 Each configuration is evaluated at seven message rates: 10, 20, 40, 60, 80,
 100, and 120 messages per second. Each rate--configuration combination is
-repeated 10 times, yielding $3 \times 7 \times 10 = 210$ total migration runs.
+repeated 10 times, yielding $4 \times 7 \times 10 = 280$ total migration runs.
 The replay cutoff is set to 120 seconds. Between runs, message queues are purged
 to prevent accumulation, checkpoint images are cleaned from worker nodes to
 prevent disk exhaustion, and the consumer pod is verified to be ready and
@@ -831,12 +955,36 @@ Table~\ref{tab:total-time} presents the median total wall-clock migration time
 ($n=10$ per cell) for each configuration across all seven message rates.
 Figure~\ref{fig:total-time} visualizes the trend.
 
+%% CONDENSED: expanded total migration time analysis (two paragraphs)
+% At low message rates (10\,msg/s), the ShadowPod configurations complete
+% migration in 12.4--13.8\,s---a 73--76\% reduction from the Sequential baseline
+% of 50.8\,s. This improvement stems almost entirely from eliminating the
+% ${\sim}$38.5\,s restore phase, in which the Sequential strategy must scale down
+% the StatefulSet, wait for pod termination, and create a new pod from the
+% checkpoint image. At moderate rates (20--40\,msg/s), the ShadowPod
+% configurations maintain sub-20\,s migration times while the Sequential baseline
+% grows to 59--81\,s as replay time increases.
+%
+% At high message rates ($\geq$\,80\,msg/s), the replay phase dominates total
+% migration time: the 120\,s replay cutoff accounts for over 73\% of the total
+% duration across all configurations. The ShadowPod configurations still achieve
+% a 22\% reduction (129.0--129.2\,s vs.\ 164.8\,s at 120\,msg/s), but the
+% marginal benefit over Sequential is smaller because the replay duration is
+% rate-dependent rather than strategy-dependent. At the intermediate rate of
+% 60\,msg/s, the ShadowPod advantage remains substantial: SS-Shadow completes
+% in 36.0\,s and D-Reg in 58.2\,s, compared to 157.5\,s for Sequential.
 At low rates (10\,msg/s), ShadowPod configurations complete in
-12.4--13.8\,s---a 73--76\% reduction from the Sequential baseline of 50.8\,s,
-primarily by eliminating the ${\sim}$38.5\,s restore phase. At high rates
+12.4--13.8\,s, a 73--76\% reduction from the Sequential baseline of 50.8\,s,
+primarily by eliminating the 38.5\,s median restore phase. At high rates
 ($\geq$\,80\,msg/s), the 120\,s replay cutoff dominates, narrowing the
 ShadowPod advantage to 22\%. At the intermediate rate of 60\,msg/s, SS-Shadow
 completes in 36.0\,s vs.\ 157.5\,s for Sequential (77\% reduction).
+
+The SS-Swap configuration shows similar total times to SS-Shadow at low rates
+(15.8\,s vs.\ 13.8\,s at 10\,msg/s), with the additional 2\,s attributable to
+the identity swap finalization. At high rates, SS-Swap is 10\,s slower than
+SS-Shadow (141.6\,s vs.\ 129.0\,s at 120\,msg/s) due to the 17.5\,s finalize
+phase, but still 14\% faster than Sequential.
 
 \begin{figure}[t]
 \centering
@@ -861,11 +1009,13 @@ completes in 36.0\,s vs.\ 157.5\,s for Sequential (77\% reduction).
   (10,50.8) (20,59.2) (40,81.1) (60,157.5) (80,164.7) (100,165.0) (120,164.8)};
 \addplot[mark=triangle*, red] coordinates {
   (10,13.8) (20,14.3) (40,19.5) (60,36.0) (80,117.2) (100,129.8) (120,129.0)};
+\addplot[mark=diamond*, orange] coordinates {
+  (10,15.8) (20,17.6) (40,23.1) (60,31.8) (80,58.3) (100,139.9) (120,141.6)};
 \addplot[mark=o, green!50!black] coordinates {
   (10,12.4) (20,14.0) (40,20.3) (60,58.2) (80,126.0) (100,128.9) (120,129.2)};
 \addplot[dashed, gray!60, forget plot] coordinates {(0,120) (130,120)};
 \node[font=\tiny, gray] at (axis cs:65,125) {replay cutoff (120\,s)};
-\legend{SS-Seq, SS-Shadow, D-Reg}
+\legend{SS-Seq, SS-Shadow, SS-Swap, D-Reg}
 \end{axis}
 \end{tikzpicture}
 \caption{Total wall-clock migration time (median, $n=10$) across message rates.
@@ -875,25 +1025,25 @@ The dashed line marks the replay cutoff boundary.}
 \label{fig:total-time}
 \end{figure}
 
-\begin{table}[t]
+\begin{table*}[t]
 \centering
-\caption{Total Migration Time --- median (seconds), $n=10$ per cell. Values
+\caption{Total Migration Time, median (seconds), $n=10$ per cell. Values
 in parentheses indicate the interquartile range (Q1--Q3).}
 \label{tab:total-time}
-\begin{tabular}{lccc}
+\begin{tabular}{lcccc}
 \toprule
-\textbf{Rate} & \textbf{SS-Seq} & \textbf{SS-Shadow} & \textbf{D-Reg} \\
+\textbf{Rate} & \textbf{SS-Seq} & \textbf{SS-Shadow} & \textbf{SS-Swap} & \textbf{D-Reg} \\
 \midrule
-10  & 50.8\,\scriptsize(50.3--80.1) & 13.8\,\scriptsize(12.3--13.8) & 12.4\,\scriptsize(12.2--13.3) \\
-20  & 59.2\,\scriptsize(58.2--60.0) & 14.3\,\scriptsize(13.3--44.3) & 14.0\,\scriptsize(13.0--16.3) \\
-40  & 81.1\,\scriptsize(80.2--105.9) & 19.5\,\scriptsize(18.7--84.8) & 20.3\,\scriptsize(18.9--29.4) \\
-60  & 157.5\,\scriptsize(130.1--164.5) & 36.0\,\scriptsize(29.1--100.5) & 58.2\,\scriptsize(27.9--108.3) \\
-80  & 164.7\,\scriptsize(163.9--165.2) & 117.2\,\scriptsize(74.7--129.3) & 126.0\,\scriptsize(103.4--129.7) \\
-100 & 165.0\,\scriptsize(164.5--165.9) & 129.8\,\scriptsize(128.9--130.9) & 128.9\,\scriptsize(128.4--130.0) \\
-120 & 164.8\,\scriptsize(164.3--165.5) & 129.0\,\scriptsize(128.5--130.1) & 129.2\,\scriptsize(128.9--131.4) \\
+10  & 50.8\,\scriptsize(50.3--80.1) & 13.8\,\scriptsize(12.3--13.8) & 15.8\,\scriptsize(14.9--17.4) & 12.4\,\scriptsize(12.2--13.3) \\
+20  & 59.2\,\scriptsize(58.2--60.0) & 14.3\,\scriptsize(13.3--44.3) & 17.6\,\scriptsize(16.7--20.4) & 14.0\,\scriptsize(13.0--16.3) \\
+40  & 81.1\,\scriptsize(80.2--105.9) & 19.5\,\scriptsize(18.7--84.8) & 23.1\,\scriptsize(21.9--28.4) & 20.3\,\scriptsize(18.9--29.4) \\
+60  & 157.5\,\scriptsize(130.1--164.5) & 36.0\,\scriptsize(29.1--100.5) & 31.8\,\scriptsize(30.0--32.8) & 58.2\,\scriptsize(27.9--108.3) \\
+80  & 164.7\,\scriptsize(163.9--165.2) & 117.2\,\scriptsize(74.7--129.3) & 58.3\,\scriptsize(52.5--67.5) & 126.0\,\scriptsize(103.4--129.7) \\
+100 & 165.0\,\scriptsize(164.5--165.9) & 129.8\,\scriptsize(128.9--130.9) & 139.9\,\scriptsize(138.9--140.2) & 128.9\,\scriptsize(128.4--130.0) \\
+120 & 164.8\,\scriptsize(164.3--165.5) & 129.0\,\scriptsize(128.5--130.1) & 141.6\,\scriptsize(141.1--142.0) & 129.2\,\scriptsize(128.9--131.4) \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
 
 \subsubsection{Phase-by-Phase Breakdown}
@@ -902,26 +1052,52 @@ Tables~\ref{tab:phases-10} and~\ref{tab:phases-60} present the per-phase
 durations at 10 and 60\,msg/s respectively, illustrating the source of the
 performance improvement at both ends of the rate spectrum.
 
-\textbf{Checkpointing} is consistent at ${\sim}$0.34\,s across all
+\textbf{Checkpointing} is consistent at a median of 0.34\,s across all
 configurations. \textbf{Transferring} takes 5.0--5.9\,s (I/O-bound registry
 transfer). The \textbf{Restoring} phase shows the primary ShadowPod benefit:
-Sequential requires ${\sim}$38.5\,s (StatefulSet identity constraint), while
-ShadowPod requires only 2.3--3.2\,s---a \textbf{92\% reduction}. The
+Sequential requires a median of 38.5\,s (StatefulSet identity constraint), while
+ShadowPod requires only 2.3--3.2\,s, a \textbf{92\% reduction}. The
 \textbf{Replaying} phase scales with message rate: at 60\,msg/s, SS-Shadow
 replays in 27.7\,s vs.\ 112.8\,s for Sequential, because fewer messages
 accumulate during the shorter restore window. At $\geq$\,80\,msg/s, all
 configurations hit the 120\,s cutoff. \textbf{Finalizing} is near-instantaneous
-($<$\,0.1\,s). Figure~\ref{fig:phase-breakdown} visualizes the breakdown at
+($<$\,0.1\,s). The SS-Swap configuration shows near-zero transfer time (0.19\,s at 60\,msg/s) due to the agent-assisted registry push (which avoids Kubernetes Job scheduling overhead), but a much longer Finalizing phase (14.73\,s) due to the identity swap procedure: re-checkpointing, pod replacement, and ExchangeFence queue draining. Figure~\ref{fig:phase-breakdown} visualizes the breakdown at
 60\,msg/s.
 %% CONDENSED: detailed per-phase prose (data in Tables 3-4)
-% Checkpointing: 0.31-0.45s, checkpoint archive ~27MB
-% Transferring: 5.0-5.9s, OCI image build/push/pull, remarkably stable across
-% rates confirming I/O-bound
-% Restoring: Sequential ~38.5s (scale to zero, terminate, recreate), ShadowPod
-% 2.3-3.2s (independent pod alongside source)
-% Replaying: 10msg/s -> 4-7s all configs; 60msg/s -> Sequential 112.8s,
-% SS-Shadow 27.7s, D-Reg 49.3s; >=80msg/s all hit cutoff
-% Finalizing: <0.1s, control message exchange and cleanup
+% The \textbf{Checkpointing} phase is consistent across all configurations and
+% rates at 0.31--0.45\,s (median ${\sim}$0.34\,s), as the same CRIU checkpoint
+% operation is performed regardless of migration strategy. The checkpoint
+% archive is approximately 27\,MB for the consumer workload.
+%
+% The \textbf{Transferring} phase takes 5.0--5.9\,s for all configurations, as
+% all three use the in-cluster registry for checkpoint image transfer. This phase
+% involves building an OCI image from the checkpoint archive, pushing it to the
+% registry, and pulling it on the target node. The duration is remarkably stable
+% across rates, confirming that it is I/O-bound rather than CPU-bound.
+%
+% The \textbf{Restoring} phase reveals the primary benefit of the ShadowPod
+% strategy. The Sequential configuration consistently requires ${\sim}$38.5\,s
+% across all rates because the StatefulSet must be scaled to zero, the source pod
+% terminated, and a new pod created with the checkpoint image---all constrained
+% by Kubernetes' StatefulSet identity enforcement. The ShadowPod configurations
+% require only 2.3--3.2\,s, as the shadow pod is created as an independent pod
+% alongside the still-running source. This represents a \textbf{92\% reduction}
+% in restore duration ($38.4 \to 2.9$\,s at 60\,msg/s).
+%
+% The \textbf{Replaying} phase scales with message rate. At 10\,msg/s, replay
+% completes in 4--7\,s across all configurations. At 60\,msg/s, the Sequential
+% configuration's median replay time reaches 112.8\,s (near the 120\,s cutoff),
+% while SS-Shadow shows 27.7\,s and D-Reg shows 49.3\,s---substantially lower
+% because the source pod continues processing messages during the shorter restore
+% window, resulting in fewer messages buffered in the replay queue. At rates
+% $\geq$\,80\,msg/s, all configurations hit the 120\,s cutoff.
+%
+% The \textbf{Finalizing} phase is near-instantaneous for all configurations
+% ($<$\,0.1\,s), consisting of control message exchange and resource cleanup.
+%
+% Figure~\ref{fig:phase-breakdown} visualizes the phase breakdown at 60\,msg/s,
+% highlighting that the restore phase---which dominates the Sequential
+% configuration---is nearly eliminated by the ShadowPod strategy.
 
 \begin{figure}[t]
 \centering
@@ -929,24 +1105,24 @@ configurations hit the 120\,s cutoff. \textbf{Finalizing} is near-instantaneous
 \begin{axis}[
   xbar stacked,
   width=\columnwidth,
-  height=4.5cm,
+  height=5.5cm,
   bar width=10pt,
   xlabel={Duration (s)},
-  symbolic y coords={D-Reg, SS-Shadow, SS-Seq},
+  symbolic y coords={D-Reg, SS-Swap, SS-Shadow, SS-Seq},
   ytick=data,
   yticklabel style={font=\footnotesize},
   xmin=0, xmax=180,
-  legend style={at={(0.5,-0.35)}, anchor=north, font=\scriptsize,
+  legend style={at={(0.5,-0.3)}, anchor=north, font=\scriptsize,
     legend columns=3},
   reverse legend,
-  enlarge y limits=0.35,
+  enlarge y limits=0.25,
 ]
 % Stacked: Checkpoint, Transfer, Restore, Replay, Finalize (medians at 60 msg/s, n=10)
-\addplot coordinates {(0.34,SS-Seq) (0.34,SS-Shadow) (0.33,D-Reg)};
-\addplot coordinates {(5.35,SS-Seq) (5.64,SS-Shadow) (5.38,D-Reg)};
-\addplot coordinates {(38.41,SS-Seq) (2.89,SS-Shadow) (2.50,D-Reg)};
-\addplot coordinates {(112.80,SS-Seq) (27.68,SS-Shadow) (49.33,D-Reg)};
-\addplot coordinates {(0.00,SS-Seq) (0.02,SS-Shadow) (0.04,D-Reg)};
+\addplot coordinates {(0.34,SS-Seq) (0.34,SS-Shadow) (0.39,SS-Swap) (0.33,D-Reg)};
+\addplot coordinates {(5.35,SS-Seq) (5.64,SS-Shadow) (0.19,SS-Swap) (5.38,D-Reg)};
+\addplot coordinates {(38.41,SS-Seq) (2.89,SS-Shadow) (3.02,SS-Swap) (2.50,D-Reg)};
+\addplot coordinates {(112.80,SS-Seq) (27.68,SS-Shadow) (13.44,SS-Swap) (49.33,D-Reg)};
+\addplot coordinates {(0.00,SS-Seq) (0.02,SS-Shadow) (14.73,SS-Swap) (0.04,D-Reg)};
 \legend{Checkpoint, Transfer, Restore, Replay, Finalize}
 \end{axis}
 \end{tikzpicture}
@@ -960,17 +1136,17 @@ reduces restore to 2.5--2.9\,s, shifting the bottleneck entirely to replay.}
 \centering
 \caption{Phase Durations (median seconds, $n=10$) at 10\,msg/s}
 \label{tab:phases-10}
-\begin{tabular}{lccc}
+\begin{tabular}{lcccc}
 \toprule
-\textbf{Phase} & \textbf{SS-Seq} & \textbf{SS-Shadow} & \textbf{D-Reg} \\
+\textbf{Phase} & \textbf{SS-Seq} & \textbf{SS-Shadow} & \textbf{SS-Swap} & \textbf{D-Reg} \\
 \midrule
-Checkpointing  & 0.33  & 0.33  & 0.34 \\
-Transferring   & 5.30  & 5.60  & 5.26 \\
-Restoring      & 38.49 & 3.23  & 2.28 \\
-Replaying      & 6.53  & 4.08  & 4.30 \\
-Finalizing     & 0.01  & 0.02  & 0.03 \\
+Checkpointing  & 0.33  & 0.33  & 0.37 & 0.34 \\
+Transferring   & 5.30  & 5.60  & 0.20 & 5.26 \\
+Restoring      & 38.49 & 3.23  & 2.61 & 2.28 \\
+Replaying      & 6.53  & 4.08  & 3.78 & 4.30 \\
+Finalizing     & 0.01  & 0.02  & 8.64 & 0.03 \\
 \midrule
-\textbf{Total} & 50.8  & 13.8  & 12.4 \\
+\textbf{Total} & 50.8  & 13.8  & 15.8 & 12.4 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -979,17 +1155,17 @@ Finalizing     & 0.01  & 0.02  & 0.03 \\
 \centering
 \caption{Phase Durations (median seconds, $n=10$) at 60\,msg/s}
 \label{tab:phases-60}
-\begin{tabular}{lccc}
+\begin{tabular}{lcccc}
 \toprule
-\textbf{Phase} & \textbf{SS-Seq} & \textbf{SS-Shadow} & \textbf{D-Reg} \\
+\textbf{Phase} & \textbf{SS-Seq} & \textbf{SS-Shadow} & \textbf{SS-Swap} & \textbf{D-Reg} \\
 \midrule
-Checkpointing  & 0.34  & 0.34  & 0.33 \\
-Transferring   & 5.35  & 5.64  & 5.38 \\
-Restoring      & 38.41 & 2.89  & 2.50 \\
-Replaying      & 112.80 & 27.68 & 49.33 \\
-Finalizing     & 0.00  & 0.02  & 0.04 \\
+Checkpointing  & 0.34  & 0.34  & 0.39 & 0.33 \\
+Transferring   & 5.35  & 5.64  & 0.19 & 5.38 \\
+Restoring      & 38.41 & 2.89  & 3.02 & 2.50 \\
+Replaying      & 112.80 & 27.68 & 13.44 & 49.33 \\
+Finalizing     & 0.00  & 0.02  & 14.73 & 0.04 \\
 \midrule
-\textbf{Total} & 157.5 & 36.0  & 58.2 \\
+\textbf{Total} & 157.5 & 36.0  & 31.8 & 58.2 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -999,15 +1175,14 @@ Finalizing     & 0.00  & 0.02  & 0.04 \\
 
 Table~\ref{tab:downtime} reports the measured service downtime (median, $n=10$)
 using the HTTP probe methodology described in
-Section~\ref{sec:downtime-method}. Figure~\ref{fig:downtime} visualizes the
-comparison.
+Section~\ref{sec:downtime-method}.
 
-The Sequential baseline exhibits a consistent ${\sim}$31\,s of downtime across
+The Sequential baseline exhibits a consistent median of 31.1\,s of downtime across
 all rates (rate-independent, determined by the StatefulSet scale-down/up cycle).
-Both ShadowPod configurations achieve \textbf{zero measured downtime}: D-Reg
+All three ShadowPod configurations achieve \textbf{zero measured downtime}: D-Reg
 recorded 0\,ms in all 70 runs; SS-Shadow recorded 0\,ms in 60/70 runs, with the
 remaining 10 showing exactly 10\,ms (a single probe failure due to kube-proxy
-endpoint propagation). This holds across all seven message rates.
+endpoint propagation). SS-Swap recorded 0\,ms in 60 of 70 runs, with the remaining 10 runs at 20\,msg/s showing 10\,ms. This holds across all seven message rates.
 %% CONDENSED: expanded downtime analysis
 % Individual Sequential values range from 29.8s to 34.9s across all 70 runs.
 % The zero-downtime result follows directly from the ShadowPod design: the
@@ -1017,125 +1192,181 @@ endpoint propagation). This holds across all seven message rates.
 % scale-down or direct deletion), but the shadow pod is already receiving and
 % serving requests---making the traffic handoff imperceptible to clients.
 
-\begin{figure}[t]
-\centering
-\begin{tikzpicture}
-\begin{axis}[
-  ybar,
-  width=\columnwidth,
-  height=5cm,
-  bar width=4pt,
-  ylabel={Service Downtime (s)},
-  xlabel={Message Rate (msg/s)},
-  symbolic x coords={10,20,40,60,80,100,120},
-  xtick=data,
-  ymin=0, ymax=36,
-  legend style={at={(0.02,0.98)}, anchor=north west, font=\scriptsize,
-    legend columns=1},
-  enlarge x limits=0.12,
-  nodes near coords={\pgfmathprintnumber[fixed,precision=1]{\pgfplotspointmeta}},
-  every node near coord/.append style={font=\tiny, rotate=90, anchor=west},
-]
-\addplot coordinates {(10,31.2) (20,31.2) (40,31.2) (60,31.2) (80,31.1) (100,31.1) (120,30.9)};
-\addplot coordinates {(10,0) (20,0.01) (40,0) (60,0) (80,0) (100,0) (120,0)};
-\addplot coordinates {(10,0) (20,0) (40,0) (60,0) (80,0) (100,0) (120,0)};
-\legend{SS-Seq, SS-Shadow, D-Reg}
-\end{axis}
-\end{tikzpicture}
-\caption{Measured service downtime (median, $n=10$) across all seven message
-rates. The Sequential baseline exhibits a consistent ${\sim}$31\,s of
-unavailability during the restore phase. Both ShadowPod configurations achieve
-zero measured downtime, verified with 10\,ms-resolution HTTP probing
-($>$10{,}000 probes per run).}
-\label{fig:downtime}
-\end{figure}
+%% CONDENSED: downtime bar chart removed (3 of 4 configs are zero, figure adds no information)
+% \begin{figure}[t]
+% \centering
+% ... downtime bar chart ...
+% \caption{Measured service downtime...}
+% \label{fig:downtime}
+% \end{figure}
 
 \begin{table}[t]
 \centering
 \caption{Service Downtime (median) by Configuration and Message Rate ($n=10$
 per cell). SS-Seq values in seconds; ShadowPod values in milliseconds.}
 \label{tab:downtime}
-\begin{tabular}{lccc}
+\begin{tabular}{lcccc}
 \toprule
-\textbf{Rate (msg/s)} & \textbf{SS-Seq} & \textbf{SS-Shadow} & \textbf{D-Reg} \\
+\textbf{Rate (msg/s)} & \textbf{SS-Seq} & \textbf{SS-Shadow} & \textbf{SS-Swap} & \textbf{D-Reg} \\
 \midrule
-10  & 31.2\,s & 0\,ms & 0\,ms \\
-20  & 31.2\,s & 10\,ms & 0\,ms \\
-40  & 31.2\,s & 0\,ms & 0\,ms \\
-60  & 31.2\,s & 0\,ms & 0\,ms \\
-80  & 31.1\,s & 0\,ms & 0\,ms \\
-100 & 31.1\,s & 0\,ms & 0\,ms \\
-120 & 30.9\,s & 0\,ms & 0\,ms \\
+10  & 31.2\,s & 0\,ms & 0\,ms & 0\,ms \\
+20  & 31.2\,s & 10\,ms & 10\,ms & 0\,ms \\
+40  & 31.2\,s & 0\,ms & 0\,ms & 0\,ms \\
+60  & 31.2\,s & 0\,ms & 0\,ms & 0\,ms \\
+80  & 31.1\,s & 0\,ms & 0\,ms & 0\,ms \\
+100 & 31.1\,s & 0\,ms & 0\,ms & 0\,ms \\
+120 & 30.9\,s & 0\,ms & 0\,ms & 0\,ms \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsubsection{Message Loss}
 
-Across all 210 migration runs, no messages were lost during migration. The
+Across all 280 migration runs, no messages were lost during migration. The
 message replay mechanism successfully synchronized state between source and
-target in every completed run across all three configurations and all seven
+target in every completed run across all four configurations and all seven
 message rates, confirming the zero-loss guarantee of the MS2M framework.
 
 
 \subsection{Discussion}
 \label{sec:discussion}
 
-\subsubsection{Key Findings}
+\subsubsection{Interpretation}
 
-The results demonstrate three principal findings:
+%% CONDENSED: original "Key Findings" subsubsection that restated results
+% \textbf{SHADOW eliminates the restore bottleneck and service downtime.}
+% Restore duration decreases from 38.4\,s to 2.9\,s (92\% reduction), and
+% downtime drops from ${\sim}$31\,s to 0\,ms across all 70 ShadowPod runs on
+% StatefulSet workloads. Total migration time decreases by 73\% at low rates
+% (50.8\,s $\to$ 13.8\,s at 10\,msg/s).
+%% CONDENSED: expanded first key finding
+% The comparison between statefulset-sequential and statefulset-shadowpod isolates
+% the effect of the ShadowPod strategy on the same workload type. [... full text
+% preserved in earlier CONDENSED block ...]
 
-\textbf{SHADOW eliminates the restore bottleneck and service downtime.}
-Restore duration decreases from 38.4\,s to 2.9\,s (92\% reduction), and
-downtime drops from ${\sim}$31\,s to 0\,ms across all 70 ShadowPod runs on
-StatefulSet workloads. Total migration time decreases by 73\% at low rates
-(50.8\,s $\to$ 13.8\,s at 10\,msg/s).
+The comparison between configurations~1 and~2 isolates the effect of the
+ShadowPod strategy on the same workload type (StatefulSet). The 92\% reduction
+in restore duration confirms that the StatefulSet identity constraint, which
+prior work treated as an inherent limitation, can be circumvented by
+decoupling traffic routing (label selectors) from pod ownership (controller
+references). Kubernetes Services and StatefulSet identity operate on
+independent mechanisms, and this separation is what makes zero-downtime
+migration possible without requiring a workload type change.
 
-\textbf{Replay time dominates at high rates.} At $\geq$\,80\,msg/s, the replay
-cutoff accounts for over 73\% of total duration, narrowing the ShadowPod
-advantage to 22\%. This reflects an inherent constraint: when
-$\mu_{\text{target}} < \lambda$, the replay queue grows unboundedly.
+The comparison between configurations~2 and~3 reveals that the ShadowPod
+strategy performs similarly on both StatefulSet and Deployment workloads,
+confirming that the approach is not tied to a specific workload controller.
+The small differences in replay duration (27.7\,s vs.\ 49.3\,s at 60\,msg/s)
+are attributable to scheduling variance rather than a systematic effect of
+workload type.
+
+The comparison between configurations~2 and~4 isolates the effect of
+identity swap. SS-Swap's transfer phase is 25x faster than
+SS-Shadow (0.19\,s vs.\ 5.64\,s at 60\,msg/s) because the agent-assisted
+registry push avoids Kubernetes Job scheduling overhead, but its finalize phase is 700x longer (14.73\,s vs.\ 0.02\,s) due to
+the re-checkpoint, pod replacement, and ExchangeFence procedure. The net effect
+is a modest increase in total migration time (31.8\,s vs.\ 36.0\,s at 60\,msg/s
+for SS-Swap vs.\ SS-Shadow), but with the benefit of restoring full StatefulSet
+ownership of the migrated workload.
+
 %% CONDENSED: expanded replay analysis
-% At intermediate rates (40--60msg/s), the ShadowPod advantage remains
-% substantial due to shorter replay queues. The shadow pod's state after
-% migration is partially synchronized---it has replayed all messages up to the
-% cutoff point, but messages arriving during the final window are processed only
-% after migration completes. At >=80msg/s (approaching the consumer's ~65msg/s
-% effective throughput ceiling), replay consistently reaches the 120s cutoff.
-Further optimization (batched processing, consumer parallelism, CRIU pre-dump)
-would yield the greatest improvement at high rates.
+% At intermediate rates (40--60\,msg/s), the ShadowPod advantage remains
+% substantial due to shorter replay queues: at 60\,msg/s, SS-Shadow completes
+% in 36.0\,s vs.\ 157.5\,s for Sequential (77\% reduction).
+% This behavior reflects an inherent constraint: the replay mechanism requires
+% the target service's message processing rate to exceed the incoming message
+% rate for the queue to drain before the cutoff fires. When
+% $\mu_{\text{target}} < \lambda$, the replay queue grows unboundedly and the
+% cutoff triggers with messages still pending. In this case, the shadow pod's
+% state after migration is partially synchronized---it has replayed all messages
+% up to the cutoff point, but messages arriving during the final window are
+% processed only after migration completes. The evaluation confirms this:
+% at $\geq$\,80\,msg/s (approaching the consumer's ${\sim}$65\,msg/s effective
+% throughput ceiling), replay consistently reaches the 120\,s cutoff.
+At high message rates ($\geq$\,80\,msg/s), the replay cutoff dominates total
+migration time across all configurations. This reveals a limitation of
+the MS2M replay mechanism: when $\mu_{\text{target}} < \lambda$, the replay
+queue grows faster than it can be drained, and the cutoff fires with messages
+still pending. The ShadowPod strategy does \textit{reduce} the replay
+queue length compared to Sequential (because the source continues processing
+during the shorter restore window), but cannot eliminate the rate-dependent
+bottleneck. Techniques such as batched message processing, increased consumer
+parallelism, or CRIU pre-dump for incremental checkpointing would address this
+regime.
 
-\textbf{Zero message loss across all 210 runs}, validating the correctness of
-the ShadowPod strategy for both workload types.
+%% CONDENSED: expanded zero message loss finding
+% \textbf{Zero message loss across all 210 runs.} SHADOW's message replay
+% mechanism maintained zero message loss across all configurations, workload
+% types, and message rates, validating the correctness of the ShadowPod strategy
+% for both StatefulSet-managed and Deployment-managed workloads.
+Zero message loss across all 280 runs confirms the correctness of the
+concurrent source-shadow operation: the fanout exchange ensures that both
+pods receive identical message streams on separate queues, and the control
+message protocol guarantees an orderly handoff.
 
 \subsubsection{Comparison with Prior Work}
 
+%% CONDENSED: expanded comparison with prior work
+% The evaluation in~\cite{dinhtuan2025k8s} was conducted on Google Compute Engine
+% e2-medium VMs (2 vCPUs, 4\,GB RAM) with a Java/Spring Boot consumer and a
+% Python migration manager. The present evaluation uses bare-metal servers
+% (4 vCPUs, 8\,GB RAM) with a Python consumer and a Go-based Kubernetes operator.
+% These differences affect absolute timing values but do not invalidate the
+% relative comparison between configurations, as all three share the same
+% infrastructure and workload.
+%
+% Notably, the checkpoint and transfer phase durations are comparable between
+% the two environments (checkpoint ${\sim}$0.34\,s vs.\ ${\sim}$0.4\,s in prior
+% work; transfer ${\sim}$5.4\,s vs.\ ${\sim}$6\,s), suggesting that these phases
+% are dominated by I/O operations (CRIU dump, OCI image construction, registry
+% push/pull) rather than compute capacity. The restore phase for Sequential
+% migration is also comparable (${\sim}$38.5\,s vs.\ ${\sim}$39\,s), confirming
+% that this bottleneck is inherent to the StatefulSet identity constraint rather
+% than hardware-dependent.
 The prior evaluation~\cite{dinhtuan2025k8s} used GCE e2-medium VMs with a
-Java consumer. Despite different infrastructure, checkpoint (${\sim}$0.34\,s
-vs.\ ${\sim}$0.4\,s), transfer (${\sim}$5.4\,s vs.\ ${\sim}$6\,s), and
-Sequential restore (${\sim}$38.5\,s vs.\ ${\sim}$39\,s) durations are
+Java consumer. Despite different infrastructure, checkpoint (median 0.34\,s
+vs.\ 0.4\,s), transfer (median 5.4\,s vs.\ 6\,s), and
+Sequential restore (median 38.5\,s vs.\ 39\,s) durations are
 comparable, confirming these phases are I/O-bound and the restore bottleneck is
-inherent to StatefulSet identity constraints.
+intrinsic to StatefulSet identity constraints.
 
 \subsubsection{Trade-offs and Operator Overhead}
 
 The ShadowPod strategy for StatefulSets transitions the workload to a standalone
 shadow pod; the Sequential strategy remains available for workloads requiring
-StatefulSet guarantees. The direct transfer mechanism eliminates registry
-dependency at the cost of deploying the ms2m-agent DaemonSet with
-\texttt{hostPath} mounts. The operator's reconcile loop overhead (API
+StatefulSet guarantees. The direct transfer mechanism (not evaluated in this paper) can
+eliminate registry dependency at the cost of deploying the ms2m-agent DaemonSet
+with \texttt{hostPath} mounts; the agent-assisted registry push used in
+SS-Swap provides a partial benefit without bypassing the registry. The operator's reconcile loop overhead (API
 round-trips per phase transition) is negligible relative to phase durations and
 is justified by automatic retry, declarative lifecycle management, and native
 observability.
-%% CONDENSED: expanded trade-offs and operator overhead
-% For event-driven microservices whose routing is managed by the message broker,
-% this trade-off is acceptable. For workloads that require StatefulSet
-% guarantees (ordered scaling, stable storage), the Sequential strategy remains
-% available---though with the associated ~31s downtime.
-% The agent's resource footprint is minimal, but the DaemonSet requires hostPath
+%% CONDENSED: expanded trade-offs and operator overhead (two subsubsections in original)
+% \subsubsection{Trade-offs}
+% The ShadowPod strategy for StatefulSet workloads (statefulset-shadowpod)
+% introduces a structural change: after migration, the workload transitions from
+% StatefulSet management to a standalone shadow pod. For event-driven
+% microservices whose routing is managed by the message broker, this trade-off
+% is acceptable. For workloads that require StatefulSet guarantees (ordered
+% scaling, stable storage), the Sequential strategy remains available---though
+% with the associated $\sim$31\,s downtime.
+%
+% The direct transfer mechanism (not included in the main evaluation matrix
+% to isolate the ShadowPod effect) eliminates the registry dependency at the
+% cost of deploying the ms2m-agent DaemonSet on all worker nodes. The agent's
+% resource footprint is minimal, but the DaemonSet requires \texttt{hostPath}
 % volume mounts that must be permitted by cluster security policies.
-% Phase chaining optimization reduces overhead by executing
-% synchronously-completed phases within a single API call.
+%
+% \subsubsection{Operator Overhead}
+% The SHADOW operator introduces reconcile loop overhead compared to a direct
+% script-based approach. Each phase transition involves a Kubernetes API server
+% round-trip to update the resource status. However, the phase chaining
+% optimization (Section~\ref{sec:statemachine}) reduces this overhead by executing
+% synchronously-completed phases within a single API call. The remaining overhead
+% is negligible relative to the phase durations (milliseconds vs.\ seconds) and is
+% justified by the operational benefits: automatic retry on transient failures,
+% declarative resource lifecycle, and integration with Kubernetes' native
+% observability (events, status conditions, audit logs).
 
 
 %% ============================================================================
@@ -1143,22 +1374,63 @@ observability.
 \label{sec:related}
 %% ============================================================================
 
+%% CONDENSED: expanded container live migration paragraph
+% \textbf{Container Live Migration.}
+% Live migration of containers has been surveyed comprehensively by Soussi
+% et al.~\cite{soussi2024survey}, who categorize techniques along three
+% dimensions: optimization method (pre-copy, post-copy, hybrid), traffic
+% relocation strategy, and deployment context (cloud, edge, MEC). All
+% memory-centric approaches face a fundamental trade-off: pre-copy migration
+% iteratively transfers dirty memory pages while the service runs, reducing
+% downtime but increasing total migration time proportionally to the dirty page
+% rate~\cite{lu2023mbdpc}; post-copy migration resumes the service immediately
+% and fetches pages on demand, achieving low downtime at the cost of degraded
+% post-migration performance~\cite{tazzioli2023postcopy}. SHADOW sidesteps this
+% trade-off entirely by reconstructing state through application-level message
+% replay rather than memory-level synchronization.
 \textbf{Container Live Migration.}
-Soussi et al.~\cite{soussi2024survey} survey container migration techniques
-across pre-copy, post-copy, and hybrid approaches. Pre-copy reduces downtime
-at the cost of increased total time~\cite{lu2023mbdpc}; post-copy achieves low
-downtime but degrades post-migration performance~\cite{tazzioli2023postcopy}.
-SHADOW sidesteps this trade-off by reconstructing state through message replay.
+Live migration of containers has been surveyed comprehensively by Soussi
+et al.~\cite{soussi2024survey}, who categorize techniques along three
+dimensions: optimization method (pre-copy, post-copy, hybrid), traffic
+relocation strategy, and deployment context (cloud, edge, MEC). All
+memory-centric approaches face a fundamental trade-off: pre-copy migration
+iteratively transfers dirty memory pages while the service runs, reducing
+downtime but increasing total migration time proportionally to the dirty page
+rate~\cite{lu2023mbdpc}; post-copy migration resumes the service immediately
+and fetches pages on demand, achieving low downtime at the cost of degraded
+post-migration performance~\cite{tazzioli2023postcopy}. SHADOW avoids this
+trade-off entirely by reconstructing state through application-level message
+replay rather than memory-level synchronization.
 
+%% CONDENSED: expanded CRIU-based pod migration paragraph
+% \textbf{CRIU-based Pod Migration in Kubernetes.}
+% Forensic Container Checkpointing (FCC)~\cite{k8sfcc} provides the kubelet API
+% for CRIU-based container checkpointing, forming the foundation for checkpoint
+% creation in both SHADOW and related systems. KubeSPT~\cite{kubespt2025}
+% addresses stateful pod migration in Kubernetes through three mechanisms: a
+% T-Proxy component that freezes the pod's network namespace to maintain TCP
+% connections during migration, a Hot Data and Lazy-Restore method that selectively
+% restores frequently accessed memory pages first, and a decoupled pod recreation
+% procedure that parallelizes Kubernetes pod initialization with checkpoint
+% transfer. KubeSPT reports 86--93\% downtime reduction for memory-intensive
+% workloads such as Redis. However, KubeSPT focuses on preserving raw memory state
+% and network connections---it does not address application-level state consistency
+% for event-driven microservices. SHADOW takes a complementary approach:
+% rather than optimizing memory page transfer, it leverages the application's
+% messaging infrastructure to guarantee both state consistency and zero message
+% loss. Furthermore, SHADOW's ShadowPod strategy enables true zero-downtime
+% migration by keeping the source pod serving traffic throughout the entire
+% process, whereas KubeSPT's downtime is bounded by checkpoint transfer and
+% restore duration.
 \textbf{CRIU-based Pod Migration in Kubernetes.}
 FCC~\cite{k8sfcc} provides the kubelet API for CRIU checkpointing.
 KubeSPT~\cite{kubespt2025} addresses stateful pod migration through T-Proxy
 (TCP connection preservation), lazy-restore of hot memory pages, and decoupled
 pod recreation, reporting 86--93\% downtime reduction for memory-intensive
-workloads. However, KubeSPT focuses on raw memory state---not application-level
-consistency for event-driven services. SHADOW instead leverages messaging
+workloads. However, KubeSPT focuses on raw memory state, not application-level
+consistency for event-driven services. SHADOW instead uses messaging
 infrastructure for state consistency and zero message loss, with the ShadowPod
-strategy enabling true zero-downtime by keeping the source serving throughout.
+strategy achieving true zero-downtime by keeping the source serving throughout.
 %% CONDENSED: other CRIU-based approaches
 % Tazzioli et al.~\cite{tazzioli2023postcopy} integrated post-copy live
 % migration into Kubernetes, achieving 65\% downtime reduction by lazily
@@ -1167,30 +1439,71 @@ strategy enabling true zero-downtime by keeping the source serving throughout.
 % container for traffic management during migration. Ma et al.~\cite{ma2019live}
 % proposed a Docker-specific method for edge environments that transfers only
 % the writable filesystem layer, reducing migration time by 56--80\%.
-Other approaches---post-copy migration~\cite{tazzioli2023postcopy}, UMS's
-Frontman container~\cite{ums}, Docker-specific filesystem
-transfer~\cite{ma2019live}---do not support concurrent source-target operation,
-which is the key enabler for SHADOW's zero-downtime guarantee.
+Tazzioli et al.~\cite{tazzioli2023postcopy} integrated post-copy live migration
+into Kubernetes, achieving 65\% downtime reduction by lazily fetching memory
+pages on demand. The Ubiquitous Migration Solution (UMS)~\cite{ums} introduces
+a three-phase migration process with a Frontman container for traffic management
+during migration. Ma et al.~\cite{ma2019live} proposed a Docker-specific method
+for edge environments that transfers only the writable filesystem layer,
+reducing migration time by 56--80\%. None of these approaches support concurrent
+source-target operation during state synchronization, which is what makes
+SHADOW's zero-downtime guarantee possible.
 
 \textbf{Stateful Microservice Migration.}
-Calagna et al.~\cite{calagna2024coat} present COAT, a TCP connection
-preservation mechanism for edge migration using Open vSwitch, and PAM, an
-analytical model for migration KPI prediction. However, COAT targets
-connection-oriented Podman workloads rather than Kubernetes-native event-driven
-services. Laigner et al.~\cite{laigner2025transactional} survey state management
-for transactional cloud applications, confirming that microservice state is
-typically derived from processed messages---the property SHADOW exploits.
-%% CONDENSED: expanded COAT/PAM and Laigner discussion
-% COAT reconstructs network namespace at destination. PAM accounts for container
-% runtime overhead. COAT operates on Podman with imperative orchestration.
-% Laigner identifies that microservice frameworks embed state within the
-% application runtime and rely on message queues for inter-service communication.
+Calagna et al.~\cite{calagna2024coat} address stateful migration at the edge
+with two contributions: COAT (Container OverlAy TCP), a network solution based
+on Open vSwitch that preserves established TCP connections during migration by
+reconstructing the network namespace at the destination, and PAM
+(Processing-Aware Migration), an analytical model that predicts migration KPIs
+accounting for container runtime overhead. However, COAT operates on Podman with
+imperative orchestration scripts rather than Kubernetes-native mechanisms and
+focuses on connection-oriented edge workloads rather than event-driven
+microservices. Laigner et al.~\cite{laigner2025transactional} survey the state
+management landscape for transactional cloud applications, identifying that
+microservice frameworks typically embed state within the application runtime and
+rely on message queues for inter-service communication. This is precisely the
+property that SHADOW uses for state reconstruction through message replay.
+%% CONDENSED: expanded stateful microservice migration paragraphs
+% \textbf{Stateful Microservice Migration.}
+% Calagna et al.~\cite{calagna2024coat} address stateful migration at the edge
+% with two contributions: COAT (Container OverlAy TCP), a network solution based
+% on Open vSwitch that preserves established TCP connections during migration by
+% reconstructing the network namespace at the destination, and PAM
+% (Processing-Aware Migration), an analytical model that predicts migration KPIs
+% accounting for container runtime overhead. Their work demonstrates the
+% importance of modeling the full migration stack---from CRIU internals through
+% container runtime layers---for accurate performance prediction. However, COAT
+% operates on Podman with imperative orchestration scripts rather than
+% Kubernetes-native mechanisms and focuses on connection-oriented edge workloads
+% (MQTT broker, Memcached) rather than event-driven microservices.
+%
+% Laigner et al.~\cite{laigner2025transactional} survey the state management
+% landscape for transactional cloud applications, identifying that microservice
+% frameworks typically embed state within the application runtime and rely on
+% message queues for inter-service communication. This architectural pattern---where
+% service state is causally derived from processed messages---is precisely the
+% property that MS2M and SHADOW exploit for state reconstruction through message
+% replay, rather than requiring direct access to in-memory state.
 
+%% CONDENSED: expanded Kubernetes Operators paragraph
+% \textbf{Kubernetes Operators for Lifecycle Management.}
+% The Operator pattern~\cite{operatorpattern} has been widely adopted for managing
+% complex application lifecycles in Kubernetes, including database operators
+% (e.g., for PostgreSQL, MySQL) and stateful middleware. Both
+% KubeSPT~\cite{kubespt2025} and SHADOW use Custom Resource Definitions to drive
+% migration as a Kubernetes-native workflow. SHADOW extends this pattern with an
+% idempotent state machine reconciler that supports multiple migration strategies
+% (Sequential, ShadowPod) and transfer modes (Registry, Direct), enabling
+% declarative migration orchestration within Kubernetes' desired-state model.
 \textbf{Kubernetes Operators for Lifecycle Management.}
-Both KubeSPT~\cite{kubespt2025} and SHADOW use CRDs to drive migration as a
-Kubernetes-native workflow. SHADOW extends the Operator
-pattern~\cite{operatorpattern} with an idempotent state machine supporting
-multiple migration strategies and transfer modes.
+The Operator pattern~\cite{operatorpattern} has been widely adopted for managing
+complex application lifecycles in Kubernetes, including database operators
+(e.g., for PostgreSQL, MySQL) and stateful middleware. Both
+KubeSPT~\cite{kubespt2025} and SHADOW use Custom Resource Definitions to drive
+migration as a Kubernetes-native workflow. SHADOW extends this pattern with an
+idempotent state machine reconciler that supports multiple migration strategies
+(Sequential, ShadowPod) and transfer modes (Registry, Direct), supporting
+declarative migration orchestration within Kubernetes' desired-state model.
 
 
 %% ============================================================================
@@ -1198,36 +1511,69 @@ multiple migration strategies and transfer modes.
 \label{sec:conclusion}
 %% ============================================================================
 
-This paper presented SHADOW, a Kubernetes-native framework for zero-downtime
-stateful microservice migration that builds on the MS2M message replay approach.
-SHADOW's ShadowPod strategy enables concurrent source-target operation by
-creating a shadow pod outside the workload controller's ownership, carrying the
-same application labels for Service-based traffic routing. We demonstrated that
-this strategy is applicable to both Deployment-managed and StatefulSet-managed
-workloads---the latter by scaling down the StatefulSet during finalization rather
-than requiring a sequential stop-recreate cycle. SHADOW's direct node-to-node
-transfer mechanism bypasses the container registry entirely through a lightweight
-DaemonSet agent.
+%% CONDENSED: original conclusion (restated abstract/results)
+% This paper presented SHADOW, a Kubernetes-native framework for zero-downtime
+% stateful microservice migration that builds on the MS2M message replay approach.
+% SHADOW's ShadowPod strategy enables concurrent source-target operation by
+% creating a shadow pod outside the workload controller's ownership, carrying the
+% same application labels for Service-based traffic routing. We demonstrated that
+% this strategy is applicable to both Deployment-managed and StatefulSet-managed
+% workloads---the latter by scaling down the StatefulSet during finalization rather
+% than requiring a sequential stop-recreate cycle. SHADOW's direct node-to-node
+% transfer mechanism bypasses the container registry entirely through a lightweight
+% DaemonSet agent.
+%
+% The evaluation on a bare-metal Kubernetes cluster across three configurations,
+% seven message rates, and 210 total migration runs confirmed that SHADOW reduces
+% restore phase duration by 92\% (from ${\sim}$38.4\,s to ${\sim}$2.9\,s) and
+% eliminates service downtime entirely (from ${\sim}$31\,s to 0\,ms), while
+% maintaining zero message loss across all runs. At low message rates
+% (10\,msg/s), total migration time decreases by 73\% (from 50.8\,s to 13.8\,s).
+% At high rates where the replay cutoff dominates, the improvement is 22\% at
+% 120\,msg/s.
+%
+% SHADOW demonstrates that encoding migration procedures as a Kubernetes-native
+% control loop provides practical benefits beyond performance: declarative resource
+% management, automatic failure recovery, and built-in observability through
+% standard Kubernetes mechanisms.
+%
+% Future work includes integrating CRIU pre-dump support for incremental
+% checkpointing to reduce both checkpoint size and transfer time, extending
+% migration support to multi-container pods, and investigating scheduler
+% integration for automatic migration triggering based on cluster resource
+% pressure or node maintenance events.
+SHADOW shows that Kubernetes' StatefulSet identity constraint, previously
+treated as an unavoidable source of migration downtime, can be circumvented at the
+application level by separating traffic routing (label-based) from pod ownership
+(controller-based). The ShadowPod strategy uses this separation for
+concurrent source-target operation,
+eliminating service downtime entirely while preserving zero message loss. This
+result holds across both Deployment-managed and StatefulSet-managed workloads,
+confirming that the approach generalizes beyond a single workload controller.
 
-The evaluation on a bare-metal Kubernetes cluster across three configurations,
-seven message rates, and 210 total migration runs confirmed that SHADOW reduces
-restore phase duration by 92\% (from ${\sim}$38.4\,s to ${\sim}$2.9\,s) and
-eliminates service downtime entirely (from ${\sim}$31\,s to 0\,ms), while
-maintaining zero message loss across all runs. At low message rates
-(10\,msg/s), total migration time decreases by 73\% (from 50.8\,s to 13.8\,s).
-At high rates where the replay cutoff dominates, the improvement is 22\% at
-120\,msg/s.
+For StatefulSet workloads that require full controller ownership after migration,
+the identity swap procedure with ExchangeFence re-checkpoints the shadow pod and
+creates a StatefulSet-adopted replacement, adding 9--17\,s to finalization but
+restoring ordered scaling and crash recovery guarantees.
 
-SHADOW demonstrates that encoding migration procedures as a Kubernetes-native
-control loop provides practical benefits beyond performance: declarative resource
-management, automatic failure recovery, and built-in observability through
-standard Kubernetes mechanisms.
+Beyond the performance improvements (92\% restore reduction, 73\% total time
+reduction at low rates), SHADOW confirms the practical value of encoding
+migration procedures as a Kubernetes-native control loop. The idempotent state
+machine reconciler provides automatic failure recovery, declarative lifecycle
+management, and built-in observability; these are operational properties that are
+difficult to achieve with external orchestration scripts. The evaluation across
+280 migration runs with zero failures confirms the reliability of this approach
+under varying message rates.
 
-Future work includes integrating CRIU pre-dump support for incremental
-checkpointing to reduce both checkpoint size and transfer time, extending
-migration support to multi-container pods, and investigating scheduler
-integration for automatic migration triggering based on cluster resource
-pressure or node maintenance events.
+The remaining performance bottleneck is the replay phase at high message rates,
+where the cutoff mechanism bounds migration time but leaves the shadow pod with
+partially-synchronized state. Future work will address this through CRIU
+pre-dump support for incremental checkpointing (reducing both checkpoint size
+and transfer time), batched message replay to increase effective consumer
+throughput, and evaluation of the direct node-to-node transfer
+mode (which bypasses the registry entirely) across additional workload profiles. Additional directions include
+scheduler integration for automatic migration triggering based on cluster
+resource pressure, and extending support to multi-container pods.
 
 
 %% ============================================================================

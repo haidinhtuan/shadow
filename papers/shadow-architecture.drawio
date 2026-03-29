@@ -1,0 +1,102 @@
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36" version="29.6.6">
+  <diagram name="SHADOW Architecture" id="shadow-arch">
+    <mxGraphModel dx="1215" dy="650" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="750" background="light-dark(#FFFFFF,#FFFFFF)" math="0" shadow="0" adaptiveColors="auto">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="cp" parent="1" style="swimlane;startSize=25;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;arcSize=8;fontStyle=1;fontSize=16;" value="Control Plane" vertex="1">
+          <mxGeometry height="110" width="700" x="150" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="operator" parent="cp" style="rounded=1;whiteSpace=wrap;fillColor=#bbdefb;strokeColor=#333;fontSize=14;" value="MS2M Operator&#xa;(Reconciler)" vertex="1">
+          <mxGeometry height="50" width="140" x="10" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="apiserver" parent="cp" style="rounded=1;whiteSpace=wrap;fillColor=#bbdefb;strokeColor=#333;fontSize=14;" value="API Server" vertex="1">
+          <mxGeometry height="50" width="140" x="550" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="watch" edge="1" parent="cp" source="operator" style="edgeStyle=orthogonalEdgeStyle;fontSize=12;labelBackgroundColor=light-dark(#FFFFFF,#FFFFFF);fontColor=light-dark(#000000,#000000);strokeColor=light-dark(#000000,#000000);" target="apiserver" value="watch/update StatefulMigration CR">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="w1" parent="1" style="swimlane;startSize=25;fillColor=#d5e8d4;strokeColor=#82b366;rounded=1;arcSize=8;fontStyle=1;fontSize=16;" value="Worker 1 (Source)" vertex="1">
+          <mxGeometry height="160" width="290" x="150" y="170" as="geometry" />
+        </mxCell>
+        <mxCell id="kubelet1" parent="w1" style="rounded=1;whiteSpace=wrap;fillColor=#c8e6c9;strokeColor=#333;fontSize=14;" value="Kubelet &#xa;CRI-O + CRIU" vertex="1">
+          <mxGeometry height="50" width="140" x="10" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="agent1" parent="w1" style="rounded=1;whiteSpace=wrap;fillColor=#fff9c4;strokeColor=#333;fontSize=14;" value="ms2m-agent" vertex="1">
+          <mxGeometry height="50" width="120" x="160" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="srcpod" parent="w1" style="rounded=1;whiteSpace=wrap;fillColor=#ffe0b2;strokeColor=#333;fontSize=14;" value="Source Pod&#xa;(Consumer)" vertex="1">
+          <mxGeometry height="50" width="160" x="70" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="w2" parent="1" style="swimlane;startSize=25;fillColor=#d5e8d4;strokeColor=#82b366;rounded=1;arcSize=8;fontStyle=1;fontSize=16;" value="Worker 2 (Target)" vertex="1">
+          <mxGeometry height="160" width="300" x="550" y="170" as="geometry" />
+        </mxCell>
+        <mxCell id="agent2" parent="w2" style="rounded=1;whiteSpace=wrap;fillColor=#fff9c4;strokeColor=#333;fontSize=14;" value="ms2m-agent" vertex="1">
+          <mxGeometry height="50" width="120" x="20" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="kubelet2" parent="w2" style="rounded=1;whiteSpace=wrap;fillColor=#c8e6c9;strokeColor=#333;fontSize=14;" value="Kubelet&#xa;CRI-O + CRIU" vertex="1">
+          <mxGeometry height="50" width="140" x="150" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="tgtpod" parent="w2" style="rounded=1;whiteSpace=wrap;fillColor=#ffe0b2;strokeColor=#333;fontSize=14;" value="Shadow Pod&#xa;(Restored)" vertex="1">
+          <mxGeometry height="50" width="160" x="75" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="mq" parent="1" style="swimlane;startSize=25;fillColor=#fce4ec;strokeColor=#d32f2f;rounded=1;arcSize=8;fontStyle=1;fontSize=16;" value="Message Broker" vertex="1">
+          <mxGeometry height="150" width="700" x="150" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="primaryq" parent="mq" style="rounded=1;whiteSpace=wrap;fillColor=#FFCDD2;strokeColor=#333;fontSize=14;" value="Primary Queue" vertex="1">
+          <mxGeometry height="40" width="160" x="70" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="replayq" parent="mq" style="rounded=1;whiteSpace=wrap;fillColor=#ffcdd2;strokeColor=#333;fontSize=14;" value="Replay Queue" vertex="1">
+          <mxGeometry height="40" width="160" x="475" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="rabbitmq" parent="mq" style="rounded=1;whiteSpace=wrap;fillColor=light-dark(#FFA5B5,#321A1A);strokeColor=#333;fontSize=14;fillStyle=solid;" value="RabbitMQ" vertex="1">
+          <mxGeometry height="35" width="240" x="230" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="pq2rmq" edge="1" parent="mq" source="primaryq" style="endArrow=none;strokeColor=#999;" target="rabbitmq">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rq2rmq" edge="1" parent="mq" source="replayq" style="endArrow=none;strokeColor=#999;" target="rabbitmq">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="step1" edge="1" parent="1" source="operator" style="fontSize=12;strokeColor=light-dark(#4472C4,#FB7567);fontColor=light-dark(#4472C4,#FB7567);labelBackgroundColor=light-dark(#FFFFFF,#FFFFFF);entryX=0.25;entryY=0;entryDx=0;entryDy=0;exitX=0.25;exitY=1;exitDx=0;exitDy=0;" target="kubelet1" value="1. Checkpoint">
+          <mxGeometry relative="1" x="-0.2666" y="7" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="step2a" edge="1" parent="1" source="agent1" style="fontSize=12;strokeColor=#e74c3c;fontColor=#e74c3c;dashed=1;dashPattern=8 4;labelBackgroundColor=none;" target="agent2" value="2a. Direct">
+          <mxGeometry relative="1" y="-15" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="step2b" edge="1" parent="1" source="agent1" style="fontSize=12;strokeColor=#e74c3c;fontColor=#e74c3c;curved=1;exitX=1;exitY=0.25;exitDx=0;exitDy=0;labelBackgroundColor=none;entryX=0;entryY=0.25;entryDx=0;entryDy=0;" target="agent2" value="2b. via Registry">
+          <mxGeometry relative="1" y="1" as="geometry">
+            <mxPoint as="offset" />
+            <Array as="points">
+              <mxPoint x="500" y="191" />
+            </Array>
+            <mxPoint x="430" y="211" as="sourcePoint" />
+            <mxPoint x="560" y="213.5" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="step3" edge="1" parent="1" source="apiserver" style="fontSize=12;strokeColor=light-dark(#4472C4,#FB7567);fontColor=light-dark(#4472C4,#FB7567);labelBackgroundColor=light-dark(#FFFFFF,#FFFFFF);exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" target="kubelet2" value="3. Shadow pod">
+          <mxGeometry relative="1" x="-0.2248" y="-4" as="geometry">
+            <mxPoint y="1" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="step4" parent="1" style="text;fontSize=12;fontColor=light-dark(#000000,#000000);align=center;labelBackgroundColor=light-dark(#FFFFFF,#FFFFFF);" value="4. Finalize: switch traffic, remove source" vertex="1">
+          <mxGeometry height="20" width="250" x="375" y="330" as="geometry" />
+        </mxCell>
+        <mxCell id="consume" edge="1" parent="1" source="srcpod" style="fontSize=12;strokeColor=#e74c3c;fontColor=#e74c3c;labelBackgroundColor=light-dark(#FFFFFF,#FFFFFF);" target="primaryq" value="consume">
+          <mxGeometry relative="1" x="-0.4697" y="4" as="geometry">
+            <mxPoint x="-1" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="replay" edge="1" parent="1" source="replayq" style="fontSize=12;strokeColor=#e74c3c;fontColor=#e74c3c;labelBackgroundColor=light-dark(#FFFFFF,#FFFFFF);" target="tgtpod" value="replay">
+          <mxGeometry relative="1" x="0.5" y="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

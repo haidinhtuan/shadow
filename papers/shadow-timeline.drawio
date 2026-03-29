@@ -1,0 +1,121 @@
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36" version="29.6.6">
+  <diagram name="Timeline Comparison" id="timeline">
+    <mxGraphModel dx="1257" dy="672" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="900" pageHeight="600" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="FA_jwIOLrZ8sBmN-OKkG-17" parent="1" style="rounded=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;align=center;" value="" vertex="1">
+          <mxGeometry height="65" width="160" x="130" y="35" as="geometry" />
+        </mxCell>
+        <mxCell id="seq_label" parent="1" style="text;fontSize=13;align=left;fontStyle=1" value="SS-Seq" vertex="1">
+          <mxGeometry height="20" width="80" x="10" y="15" as="geometry" />
+        </mxCell>
+        <mxCell id="seq_src_label" parent="1" style="text;fontSize=10;fontStyle=1;align=right;" value="Source:" vertex="1">
+          <mxGeometry height="20" width="60" x="3" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="seq_ckpt" parent="1" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;align=center;" value="Checkpoint" vertex="1">
+          <mxGeometry height="25" width="60" x="70" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="seq_xfer" parent="1" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=center;" value="Transfer" vertex="1">
+          <mxGeometry height="25" width="40" x="130" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="seq_tgt_label" parent="1" style="text;fontSize=10;fontStyle=1;align=right;" value="Target:" vertex="1">
+          <mxGeometry height="20" width="60" x="3" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="seq_restore" parent="1" style="rounded=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;align=center;fontColor=#333333;" value="Restore" vertex="1">
+          <mxGeometry height="25" width="40" x="170" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="seq_replay" parent="1" style="rounded=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;align=center;" value="Replay" vertex="1">
+          <mxGeometry height="25" width="40" x="210" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="seq_fin" parent="1" style="rounded=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;align=center;" value="Finalize" vertex="1">
+          <mxGeometry height="25" width="40" x="250" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="sep1" parent="1" style="line;strokeColor=#999;dashed=1;" value="" vertex="1">
+          <mxGeometry height="1" width="450" x="10" y="105" as="geometry" />
+        </mxCell>
+        <mxCell id="sh_label" parent="1" style="text;fontSize=13;align=left;fontStyle=1" value="SS-Shadow/D-Reg" vertex="1">
+          <mxGeometry height="20" width="80" x="10" y="115" as="geometry" />
+        </mxCell>
+        <mxCell id="sh_src_label" parent="1" style="text;fontSize=10;fontStyle=1;align=right;" value="Source:" vertex="1">
+          <mxGeometry height="20" width="60" x="3" y="140" as="geometry" />
+        </mxCell>
+        <mxCell id="sh_running" parent="1" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=center;" value="Running" vertex="1">
+          <mxGeometry height="25" width="220" x="70" y="140" as="geometry" />
+        </mxCell>
+        <mxCell id="sh_shd_label" parent="1" style="text;fontSize=10;fontStyle=1;align=right;" value="Shadow:" vertex="1">
+          <mxGeometry height="20" width="60" x="3" y="170" as="geometry" />
+        </mxCell>
+        <mxCell id="sh_xfer" parent="1" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=center;" value="Transfer" vertex="1">
+          <mxGeometry height="25" width="40" x="130" y="170" as="geometry" />
+        </mxCell>
+        <mxCell id="sh_restore" parent="1" style="rounded=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;align=center;fontColor=#333333;" value="Restore" vertex="1">
+          <mxGeometry height="25" width="40" x="170" y="170" as="geometry" />
+        </mxCell>
+        <mxCell id="sh_replay" parent="1" style="rounded=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;align=center;" value="Replay" vertex="1">
+          <mxGeometry height="25" width="40" x="210" y="170" as="geometry" />
+        </mxCell>
+        <mxCell id="sh_fin" parent="1" style="rounded=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;align=center;" value="Finalize" vertex="1">
+          <mxGeometry height="25" width="40" x="250" y="170" as="geometry" />
+        </mxCell>
+        <mxCell id="sh_serves" parent="1" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=center;" value="Running" vertex="1">
+          <mxGeometry height="25" width="70" x="290" y="170" as="geometry" />
+        </mxCell>
+        <mxCell id="sep2" parent="1" style="line;strokeColor=#999;dashed=1;" value="" vertex="1">
+          <mxGeometry height="1" width="450" x="10" y="225" as="geometry" />
+        </mxCell>
+        <mxCell id="sw_label" parent="1" style="text;fontSize=13;align=left;fontStyle=1" value="SS-Swap" vertex="1">
+          <mxGeometry height="20" width="80" x="10" y="235" as="geometry" />
+        </mxCell>
+        <mxCell id="sw_src_label" parent="1" style="text;fontSize=10;fontStyle=1;align=right;" value="Source:" vertex="1">
+          <mxGeometry height="20" width="60" x="3" y="260" as="geometry" />
+        </mxCell>
+        <mxCell id="sw_running" parent="1" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=center;" value="Running" vertex="1">
+          <mxGeometry height="25" width="180" x="70" y="260" as="geometry" />
+        </mxCell>
+        <mxCell id="sw_shd_label" parent="1" style="text;fontSize=10;fontStyle=1;align=right;" value="Shadow:" vertex="1">
+          <mxGeometry height="20" width="60" x="3" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="sw_serves" parent="1" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=center;" value="" vertex="1">
+          <mxGeometry height="25" width="150" x="250" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="sw_swap_label" parent="1" style="text;fontSize=10;fontStyle=1;align=right;" value="Swap:" vertex="1">
+          <mxGeometry height="20" width="60" x="3" y="320" as="geometry" />
+        </mxCell>
+        <mxCell id="sw_reckpt" parent="1" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;align=center;" value="Re-Checkpoint" vertex="1">
+          <mxGeometry height="25" width="70" x="250" y="295" as="geometry" />
+        </mxCell>
+        <mxCell id="sw_fence" parent="1" style="rounded=1;fillColor=#b2ebf2;strokeColor=#0097a7;fontSize=10;align=center;" value="ExchangeFence" vertex="1">
+          <mxGeometry height="25" width="80" x="320" y="320" as="geometry" />
+        </mxCell>
+        <mxCell id="sw_repl" parent="1" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=center;" value="Running" vertex="1">
+          <mxGeometry height="25" width="50" x="400" y="320" as="geometry" />
+        </mxCell>
+        <mxCell id="FA_jwIOLrZ8sBmN-OKkG-9" parent="1" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=center;" value="Transfer" vertex="1">
+          <mxGeometry height="25" width="40" x="130" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="FA_jwIOLrZ8sBmN-OKkG-10" parent="1" style="rounded=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;align=center;fontColor=#333333;" value="Restore" vertex="1">
+          <mxGeometry height="25" width="40" x="170" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="FA_jwIOLrZ8sBmN-OKkG-11" parent="1" style="rounded=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;align=center;" value="Replay" vertex="1">
+          <mxGeometry height="25" width="40" x="210" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="FA_jwIOLrZ8sBmN-OKkG-12" parent="1" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=center;" value="Running" vertex="1">
+          <mxGeometry height="25" width="70" x="290" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="sw_ckpt" parent="1" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;align=center;" value="Checkpoint" vertex="1">
+          <mxGeometry height="25" width="60" x="70" y="265" as="geometry" />
+        </mxCell>
+        <mxCell id="sh_ckpt" parent="1" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;align=center;" value="Checkpoint" vertex="1">
+          <mxGeometry height="25" width="60" x="70" y="145" as="geometry" />
+        </mxCell>
+        <mxCell id="FA_jwIOLrZ8sBmN-OKkG-19" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;font style=&quot;color: rgb(255, 0, 0);&quot;&gt;Downtime&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="60" x="210" y="37.5" as="geometry" />
+        </mxCell>
+        <mxCell id="FA_jwIOLrZ8sBmN-OKkG-20" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;font style=&quot;font-size: 10px;&quot;&gt;Running&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="60" x="330" y="287.5" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
