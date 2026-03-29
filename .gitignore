@@ -48,13 +48,15 @@ cover.out
 eval/infra/
 eval/results/raw-cluster-archive/
 
-# Reference papers (PDFs in papers/ except main.tex)
-papers/*.pdf
+# Papers and drafts
+papers/
 
-# Internal docs
+# Internal docs and plans
 PLAN.md
 docs/*.md
 docs/*.txt
+docs/plans/
+docs/research/
 
 # Claude Code
 CLAUDE.md
