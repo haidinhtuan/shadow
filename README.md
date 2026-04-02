@@ -6,7 +6,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.30+-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
 [![arXiv](https://img.shields.io/badge/arXiv-2603.25484-b31b1b.svg)](https://arxiv.org/abs/2603.25484)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 SHADOW is a Kubernetes operator that performs live migration of stateful microservices between cluster nodes with zero downtime and zero message loss. It combines CRIU (Checkpoint/Restore In Userspace)-based container checkpointing with message queue replay to preserve both in-memory execution state and in-flight message consistency.
 
@@ -300,4 +300,4 @@ SHADOW is the implementation of a multi-year research effort on live migration o
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
